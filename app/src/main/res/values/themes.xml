@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Базовая тема приложения -->
+    <style name="Theme.MinimalistPlayer" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <!-- Primary brand colors -->
+        <item name="colorPrimary">@color/accent_burgundy</item>
+        <item name="colorPrimaryVariant">@color/accent_burgundy_dark</item>
+        <item name="colorOnPrimary">@color/white</item>
+
+        <!-- Secondary brand colors -->
+        <item name="colorSecondary">@color/accent_red</item>
+        <item name="colorSecondaryVariant">@color/accent_red_dark</item>
+        <item name="colorOnSecondary">@color/black</item>
+
+        <!-- Status bar color -->
+        <item name="android:statusBarColor">@color/background_dark</item>
+        <item name="android:windowLightStatusBar">false</item>
+
+        <!-- Background colors -->
+        <item name="android:windowBackground">@color/background_dark</item>
+        <item name="backgroundColor">@color/background_dark</item>
+
+        <!-- Text colors -->
+        <item name="android:textColorPrimary">@color/white</item>
+        <item name="android:textColorSecondary">@color/white_transparent</item>
+
+        <!-- NavigationView colors -->
+        <item name="navigationViewStyle">@style/Widget.MinimalistPlayer.NavigationView</item>
+    </style>
+
+    <!-- Стиль для NavigationView -->
+    <style name="Widget.MinimalistPlayer.NavigationView" parent="Widget.MaterialComponents.NavigationView">
+        <item name="itemTextColor">@color/nav_item_text_color</item>
+        <item name="itemIconTint">@color/nav_item_icon_color</item>
+        <item name="itemBackground">?selectableItemBackground</item>
+    </style>
+
+    <!-- Стиль для диалога -->
+    <style name="Theme.MinimalistPlayer.Dialog" parent="Theme.MaterialComponents.Dialog">
+        <item name="android:background">@color/background_dark</item>
+        <item name="android:textColor">@android:color/white</item>
+        <item name="android:windowMinWidthMajor">90%</item>
+        <item name="android:windowMinWidthMinor">90%</item>
+    </style>
+
+    <!-- ✅ Добавляем стиль для текста с троеточием -->
+    <!--
+    <style name="TextStyle.Ellipsis">
+        <item name="android:maxLines">1</item>
+        <item name="android:ellipsize">end</item>
+    </style>
+    -->
+
+    <style name="SearchViewStyle" parent="Widget.AppCompat.SearchView">
+        <item name="android:queryHint">Поиск...</item>
+        <item name="queryHint">Поиск...</item>
+        <item name="android:searchIcon">@drawable/ic_search</item>
+        <item name="searchIcon">@drawable/ic_search</item>
+        <item name="android:closeIcon">@drawable/ic_close</item>
+        <item name="closeIcon">@drawable/ic_close</item>
+        <item name="android:goIcon">@drawable/ic_search</item>
+        <item name="goIcon">@drawable/ic_search</item>
+    </style>
+
+
+
+</resources>

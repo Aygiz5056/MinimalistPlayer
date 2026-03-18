@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Основные цвета -->
+    <color name="purple_200">#FFBB86FC</color>
+    <color name="purple_500">#FF6200EE</color>
+    <color name="purple_700">#FF3700B3</color>
+    <color name="teal_200">#FF03DAC5</color>
+    <color name="teal_700">#FF018786</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+
+    <!-- Наши цвета с прозрачностью 73% (BA в HEX) -->
+    <color name="background_dark">#BA1E1E1E</color>  <!-- Темный фон -->
+    <color name="background_light">#BA2C2C2C</color> <!-- Светлый фон -->
+    <color name="white_transparent">#BAFFFFFF</color> <!-- Белый полупрозрачный -->
+
+    <!-- Акцентные цвета -->
+    <color name="accent_red">#FFFF4081</color>      <!-- Ярко-розовый -->
+    <color name="accent_red_dark">#FFC51162</color>  <!-- Темно-розовый -->
+    <color name="accent_red_transparent">#BAFF4081</color> <!-- Розовый полупрозрачный -->
+
+    <!-- Бордовые оттенки -->
+    <color name="accent_burgundy">#BA800020</color>     <!-- Бордовый -->
+    <color name="accent_burgundy_dark">#BA600018</color> <!-- Темно-бордовый -->
+
+    <!-- Цвета для навигации -->
+    <color name="nav_item_text">#BAFFFFFF</color>
+    <color name="nav_item_icon">#BAFFFFFF</color>
+    <color name="nav_item_selected">#FFFF4081</color>
+
+
+
+    <!-- Селекторы для NavigationView (определим позже) -->
+</resources>
