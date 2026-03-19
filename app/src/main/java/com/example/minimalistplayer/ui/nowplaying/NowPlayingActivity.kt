@@ -31,12 +31,17 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.GestureDetectorCompat
+import androidx.lifecycle.lifecycleScope
 import com.bumptech.glide.Glide
 import com.example.minimalistplayer.R
+import com.example.minimalistplayer.data.MusicRepository
 import com.example.minimalistplayer.data.Track
 import com.example.minimalistplayer.service.MusicService
 import com.example.minimalistplayer.ui.artist.ArtistTracksActivity
 import com.example.minimalistplayer.ui.visualizer.AudioVisualizerView
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 
 class NowPlayingActivity : AppCompatActivity() {
@@ -72,17 +77,18 @@ class NowPlayingActivity : AppCompatActivity() {
     private lateinit var playerControls: LinearLayout
 
     private lateinit var gestureDetector: GestureDetectorCompat
+    private lateinit var musicRepository: MusicRepository
 
     private var musicService: MusicService? = null
     private var isBound = false
 
-    private var isRecording = false
     private val handler = Handler(Looper.getMainLooper())
 
     // Данные текущего трека
     private var currentTrackId: Long = -1
     private var currentTrackTitle: String = ""
     private var currentTrackArtist: String = ""
+    private var currentTrack: Track? = null
 
     // Режимы воспроизведения
     private var isShuffleMode = false
@@ -90,77 +96,76 @@ class NowPlayingActivity : AppCompatActivity() {
 
     // Громкость
     private var currentVolume = 50
-    private var isVolumeIndicatorVisible = false
     private var screenWidth = 0
 
+    // Обновим hideVolumeRunnable с анимацией исчезновения
     private val hideVolumeRunnable = Runnable {
-        volumeIndicator.visibility = View.GONE
-        isVolumeIndicatorVisible = false
+        volumeIndicator.animate()
+            .alpha(0f)
+            .setDuration(300)
+            .withEndAction {
+                volumeIndicator.visibility = View.GONE
+                volumeIndicator.alpha = 1f // Сбрасываем для следующего показа
+            }
+            .start()
     }
 
-    // Слушатель для данных визуалайзера
-    private val visualizerDataListener = object : MusicService.VisualizerDataListener {
-        override fun onWaveformData(waveform: ByteArray) {
-            runOnUiThread {
-                if (visualizer.isVisualizing) {
-                    visualizer.updateVisualizerData(waveform)
-                }
-            }
-        }
-    }
+    // Добавим переменные для плавности
+    private var targetVolume = 50
+    private var volumeChangeHandler = Handler(Looper.getMainLooper())
+    private var volumeChangeRunnable: Runnable? = null
+    private var isVolumeAnimating = false
+
+    // Добавим переменные для отслеживания касания
+    private var isTouchingVolume = false
+    private var touchStartY = 0f
+    private var touchStartVolume = 0
+    private var screenHeight = 0
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-            try {
-                musicService = (service as MusicService.MusicBinder).getService()
-                isBound = true
-                Log.d(TAG, "Service connected")
+            Log.d(TAG, "Service connected")
+            val binder = service as MusicService.MusicBinder
+            musicService = binder.getService()
+            isBound = true
 
-                // Устанавливаем слушатель изменений треков
-                musicService?.setOnTrackChangeListener(object : MusicService.OnTrackChangeListener {
-                    override fun onTrackChanged(track: Track) {
-                        Log.d(TAG, "onTrackChanged: ${track.title}")
-                        runOnUiThread {
-                            trackTitleTextView.text = track.title
-                            trackArtistTextView.text = track.artist
-                            totalTimeTextView.text = formatTime(track.duration.toInt())
-                            loadAlbumArt(track)
-                            progressBar.progress = 0
-                            currentTimeTextView.text = "0:00"
-                        }
+            // Устанавливаем слушатель изменений треков
+            musicService?.setOnTrackChangeListener(object : MusicService.OnTrackChangeListener {
+                override fun onTrackChanged(track: Track) {
+                    runOnUiThread {
+                        currentTrack = track
+                        trackTitleTextView.text = track.title
+                        trackArtistTextView.text = track.artist
+                        totalTimeTextView.text = formatTime(track.duration.toInt())
+                        loadAlbumArt(track)
+                        progressBar.progress = 0
+                        currentTimeTextView.text = "0:00"
+                        checkFavoriteStatus(track)
                     }
+                }
 
-                    override fun onPlayStateChanged(isPlaying: Boolean) {
-                        Log.d(TAG, "onPlayStateChanged: $isPlaying")
-                        runOnUiThread {
-                            val icon = if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play
-                            playPauseButton.setImageResource(icon)
-                            visualizer.isVisualizing = isPlaying
-                        }
+                override fun onPlayStateChanged(isPlaying: Boolean) {
+                    runOnUiThread {
+                        val icon = if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play
+                        playPauseButton.setImageResource(icon)
+                        visualizer.isVisualizing = isPlaying
                     }
-                })
+                }
+            })
 
-                // Включаем визуалайзер
-                musicService?.enableVisualizer(true)
-                visualizer.isVisualizing = true
+            // Синхронизируем состояние
+            syncStateWithService()
+            updateUI()
 
-                // Устанавливаем слушатель данных визуалайзера
-                musicService?.setVisualizerListener(visualizerDataListener)
-
-                // Синхронизируем состояние
-                syncStateWithService()
-                updateUI()
-                setupServiceListeners()
-
-            } catch (e: Exception) {
-                Log.e(TAG, "Error in onServiceConnected", e)
-            }
+            // Получаем текущую громкость
+            currentVolume = getCurrentSystemVolume()
+            volumeProgress.progress = currentVolume
+            volumePercent.text = "$currentVolume%"
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
             musicService = null
             isBound = false
-            Log.d(TAG, "Service disconnected")
         }
     }
 
@@ -168,38 +173,27 @@ class NowPlayingActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_now_playing)
 
-        try {
-            // Получаем данные из Intent
-            currentTrackId = intent.getLongExtra("track_id", -1)
-            currentTrackTitle = intent.getStringExtra("track_title") ?: "Неизвестно"
-            currentTrackArtist = intent.getStringExtra("track_artist") ?: "Неизвестно"
+        // Получаем данные из Intent
+        currentTrackId = intent.getLongExtra("track_id", -1)
+        currentTrackTitle = intent.getStringExtra("track_title") ?: "Неизвестно"
+        currentTrackArtist = intent.getStringExtra("track_artist") ?: "Неизвестно"
 
-            Log.d(TAG, "Received: id=$currentTrackId, title=$currentTrackTitle, artist=$currentTrackArtist")
+        Log.d(TAG, "Received: $currentTrackTitle - $currentTrackArtist")
 
-            initViews()
-            setupGestureDetector()
-            setupClickListeners()
-            setupSeekBar()
+        musicRepository = MusicRepository(this)
 
-            // Получаем текущую громкость системы
-            currentVolume = getCurrentSystemVolume()
-            volumeProgress.progress = currentVolume
-            volumePercent.text = "$currentVolume%"
+        initViews()
+        setupGestureDetector()
+        setupClickListeners()
+        setupSeekBar()
 
-            // Показываем данные сразу
-            trackTitleTextView.text = currentTrackTitle
-            trackArtistTextView.text = currentTrackArtist
+        trackTitleTextView.text = currentTrackTitle
+        trackArtistTextView.text = currentTrackArtist
 
-            val serviceIntent = Intent(this, MusicService::class.java)
-            bindService(serviceIntent, connection, Context.BIND_AUTO_CREATE)
+        val serviceIntent = Intent(this, MusicService::class.java)
+        bindService(serviceIntent, connection, Context.BIND_AUTO_CREATE)
 
-            startProgressUpdate()
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in onCreate", e)
-            Toast.makeText(this, "Ошибка загрузки: ${e.message}", Toast.LENGTH_SHORT).show()
-            finish()
-        }
+        startProgressUpdate()
     }
 
     private fun initViews() {
@@ -227,13 +221,13 @@ class NowPlayingActivity : AppCompatActivity() {
         volumePercent = findViewById(R.id.volumePercent)
         playerInfo = findViewById(R.id.playerInfo)
         playerControls = findViewById(R.id.playerControls)
+        screenWidth = resources.displayMetrics.widthPixels
+        screenHeight = resources.displayMetrics.heightPixels
 
-        // Начальное состояние
         visualizer.isVisualizing = true
         volumeIndicator.visibility = View.GONE
         showAlbumArt(false)
 
-        // Получаем ширину экрана для жестов
         screenWidth = resources.displayMetrics.widthPixels
     }
 
@@ -242,21 +236,30 @@ class NowPlayingActivity : AppCompatActivity() {
             val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
             val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
             val currentSysVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-            (currentSysVolume * 100 / maxVolume).coerceIn(0, 100)
+            val volume = (currentSysVolume * 100 / maxVolume).coerceIn(0, 100)
+            currentVolume = volume
+            updateVolumeUI()
+            volume
         } catch (e: Exception) {
-            Log.e(TAG, "Error getting volume", e)
             50
         }
     }
 
+    // Обновим метод setVolume для плавности
     private fun setVolume(progress: Int) {
         try {
             val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
             val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
             val newVolume = (progress * maxVolume / 100).coerceIn(0, maxVolume)
             audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVolume, 0)
-            currentVolume = progress
-            updateVolumeUI()
+
+            targetVolume = progress
+
+            // Плавно обновляем UI
+            if (!isVolumeAnimating) {
+                startVolumeAnimation()
+            }
+
             showVolumeIndicator()
             Log.d(TAG, "Volume set to: $progress%")
         } catch (e: Exception) {
@@ -264,25 +267,85 @@ class NowPlayingActivity : AppCompatActivity() {
         }
     }
 
+
+    // Плавная анимация изменения громкости
+    private fun startVolumeAnimation() {
+        isVolumeAnimating = true
+        volumeChangeRunnable = object : Runnable {
+            override fun run() {
+                if (currentVolume != targetVolume) {
+                    val step = if (targetVolume > currentVolume) 1 else -1
+                    currentVolume += step
+                    // Исправляем здесь - используем updateVolumeUI вместо updateVolumeIcon
+                    updateVolumeUI()
+                    volumeChangeHandler.postDelayed(this, 20)
+                } else {
+                    isVolumeAnimating = false
+                }
+            }
+        }
+        volumeChangeHandler.post(volumeChangeRunnable!!)
+    }
+
+    // Обновим showVolumeIndicator для более длительного показа
     private fun showVolumeIndicator() {
         if (!::volumeIndicator.isInitialized) return
 
-        volumeIndicator.visibility = View.VISIBLE
-        volumeIndicator.bringToFront()
-        volumeProgress.progress = currentVolume
-        volumePercent.text = "$currentVolume%"
-        isVolumeIndicatorVisible = true
+        // При активном касании показываем всегда
+        if (isTouchingVolume) {
+            if (volumeIndicator.visibility != View.VISIBLE) {
+                volumeIndicator.alpha = 0f
+                volumeIndicator.visibility = View.VISIBLE
+                volumeIndicator.animate()
+                    .alpha(1f)
+                    .setDuration(200)
+                    .start()
+            }
+            // Сбрасываем таймер скрытия
+            volumeIndicator.removeCallbacks(hideVolumeRunnable)
+            return
+        }
 
-        updateVolumeUI()
-
-        volumeIndicator.removeCallbacks(hideVolumeRunnable)
-        volumeIndicator.postDelayed(hideVolumeRunnable, 1500)
+        // Если не касаемся, показываем с таймером
+        if (volumeIndicator.visibility == View.VISIBLE) {
+            volumeIndicator.removeCallbacks(hideVolumeRunnable)
+            volumeIndicator.postDelayed(hideVolumeRunnable, 1500)
+        } else {
+            volumeIndicator.alpha = 0f
+            volumeIndicator.visibility = View.VISIBLE
+            volumeIndicator.animate()
+                .alpha(1f)
+                .setDuration(200)
+                .withEndAction {
+                    volumeIndicator.postDelayed(hideVolumeRunnable, 1500)
+                }
+                .start()
+        }
     }
 
+    private fun setVolumeImmediate(progress: Int) {
+        try {
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            val newVolume = (progress * maxVolume / 100).coerceIn(0, maxVolume)
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVolume, 0)
+
+            // Мгновенно обновляем UI
+            updateVolumeUI()
+
+            Log.d(TAG, "Volume set to: $progress%")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting volume", e)
+        }
+    }
+
+    // Обновленный метод updateVolumeUI (единый метод для всего)
     private fun updateVolumeUI() {
+        // Обновляем прогресс
         volumeProgress.progress = currentVolume
         volumePercent.text = "$currentVolume%"
 
+        // Обновляем иконку в зависимости от громкости
         volumeIcon.setImageResource(
             when {
                 currentVolume == 0 -> R.drawable.ic_volume_mute
@@ -292,10 +355,8 @@ class NowPlayingActivity : AppCompatActivity() {
             }
         )
 
-        val iconColor = when {
-            currentVolume == 0 -> Color.parseColor("#FF808080")
-            else -> Color.parseColor("#FFFF4081")
-        }
+        // Обновляем цвет
+        val iconColor = if (currentVolume == 0) Color.GRAY else Color.parseColor("#FFFF4081")
         volumeIcon.setColorFilter(iconColor)
         volumePercent.setTextColor(iconColor)
     }
@@ -317,8 +378,6 @@ class NowPlayingActivity : AppCompatActivity() {
     }
 
     private fun loadAlbumArt(track: Track) {
-        Log.d(TAG, "Loading album art for: ${track.title}, uri: ${track.albumArtUri}")
-
         if (track.albumArtUri != null) {
             Glide.with(this)
                 .load(track.albumArtUri)
@@ -348,10 +407,8 @@ class NowPlayingActivity : AppCompatActivity() {
             }
 
             showAlbumArt(true)
-            Log.d(TAG, "Album art loaded successfully")
         } else {
             showAlbumArt(false)
-            Log.d(TAG, "No album art available")
         }
     }
 
@@ -380,49 +437,35 @@ class NowPlayingActivity : AppCompatActivity() {
         }
     }
 
-    private fun setupServiceListeners() {
-        musicService?.setOnCompletionListener {
-            Log.d(TAG, "Track completed")
-        }
-
-        musicService?.setOnPreparedListener {
-            runOnUiThread {
-                totalTimeTextView.text = formatTime(musicService?.getDuration() ?: 0)
-            }
-        }
-    }
-
     private fun syncStateWithService() {
         musicService?.let { service ->
             isShuffleMode = service.shuffleMode
             repeatMode = service.repeatMode
             updateButtonStates()
-            Log.d(TAG, "State synced - Shuffle: $isShuffleMode, Repeat: $repeatMode")
         }
     }
 
     private fun updateButtonStates() {
-        // Обновляем кнопку перемешивания
-        if (isShuffleMode) {
-            shuffleButton.setColorFilter(ContextCompat.getColor(this, R.color.accent_red))
-            shuffleButton.imageTintList = ContextCompat.getColorStateList(this, R.color.accent_red)
-            Log.d(TAG, "Shuffle button set to RED")
-        } else {
-            shuffleButton.setColorFilter(ContextCompat.getColor(this, R.color.white_transparent))
-            shuffleButton.imageTintList = ContextCompat.getColorStateList(this, R.color.white_transparent)
-            Log.d(TAG, "Shuffle button set to WHITE")
-        }
+        // Кнопка перемешивания
+        shuffleButton.setColorFilter(
+            ContextCompat.getColor(
+                this,
+                if (isShuffleMode) R.color.accent_red else R.color.white_transparent
+            )
+        )
 
-        // Обновляем кнопку повтора
+        // Кнопка повтора
         when (repeatMode) {
             MusicService.RepeatMode.NONE -> {
                 repeatButton.setImageResource(R.drawable.ic_repeat)
                 repeatButton.setColorFilter(ContextCompat.getColor(this, R.color.white_transparent))
             }
+
             MusicService.RepeatMode.ALL -> {
                 repeatButton.setImageResource(R.drawable.ic_repeat)
                 repeatButton.setColorFilter(ContextCompat.getColor(this, R.color.accent_red))
             }
+
             MusicService.RepeatMode.ONE -> {
                 repeatButton.setImageResource(R.drawable.ic_repeat_one)
                 repeatButton.setColorFilter(ContextCompat.getColor(this, R.color.accent_red))
@@ -432,16 +475,37 @@ class NowPlayingActivity : AppCompatActivity() {
 
     private fun updateUI() {
         musicService?.getCurrentTrack()?.let { track ->
-            Log.d(TAG, "updateUI: ${track.title}")
+            currentTrack = track
             trackTitleTextView.text = track.title
             trackArtistTextView.text = track.artist
             totalTimeTextView.text = formatTime(track.duration.toInt())
 
-            val icon = if (musicService?.isPlaying == true) R.drawable.ic_pause else R.drawable.ic_play
-            playPauseButton.setImageResource(icon)
+            playPauseButton.setImageResource(
+                if (musicService?.isPlaying == true) R.drawable.ic_pause else R.drawable.ic_play
+            )
 
             loadAlbumArt(track)
+            checkFavoriteStatus(track)
         }
+    }
+
+    private fun checkFavoriteStatus(track: Track) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val isFavorite = musicRepository.isFavorite(track.id)
+                withContext(Dispatchers.Main) {
+                    updateFavoriteButton(isFavorite)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error checking favorite", e)
+            }
+        }
+    }
+
+    private fun updateFavoriteButton(isFavorite: Boolean) {
+        val icon = if (isFavorite) R.drawable.ic_favorite else R.drawable.ic_favorite_border
+        favoriteButton.setImageResource(icon)
+        favoriteButton.tag = if (isFavorite) "favorite" else "not_favorite"
     }
 
     private fun formatTime(millis: Int): String {
@@ -494,7 +558,6 @@ class NowPlayingActivity : AppCompatActivity() {
                         }
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error in progress update", e)
                     break
                 }
             }
@@ -504,44 +567,17 @@ class NowPlayingActivity : AppCompatActivity() {
     private fun setupGestureDetector() {
         Log.d(TAG, "setupGestureDetector called")
 
+        // Создаем детектор жестов для свайпов и двойного тапа
         gestureDetector = GestureDetectorCompat(this, object : GestureDetector.SimpleOnGestureListener() {
 
-            override fun onDown(e: MotionEvent): Boolean {
-                return true
-            }
+            override fun onDown(e: MotionEvent): Boolean = true
 
-            override fun onFling(
-                e1: MotionEvent?,
-                e2: MotionEvent,
-                velocityX: Float,
-                velocityY: Float
-            ): Boolean {
+            override fun onFling(e1: MotionEvent?, e2: MotionEvent, velocityX: Float, velocityY: Float): Boolean {
+                if (e1 == null) return false
+
                 Log.d(TAG, "Fling detected: vX=$velocityX, vY=$velocityY")
 
-                if (e1 == null || e2 == null) return false
-
-                val startX = e1.x
-                val isRightSide = startX > screenWidth / 2
-
-                // Вертикальные свайпы для громкости (только правая половина)
-                if (abs(velocityY) > abs(velocityX) && abs(velocityY) > 300 && isRightSide) {
-                    if (velocityY < -300) {
-                        // Свайп вверх - громче
-                        currentVolume = (currentVolume + 15).coerceIn(0, 100)
-                        setVolume(currentVolume)
-                        showVolumeIndicator()
-                        Log.d(TAG, "Volume up fling: $currentVolume%")
-                    } else if (velocityY > 300) {
-                        // Свайп вниз - тише
-                        currentVolume = (currentVolume - 15).coerceIn(0, 100)
-                        setVolume(currentVolume)
-                        showVolumeIndicator()
-                        Log.d(TAG, "Volume down fling: $currentVolume%")
-                    }
-                    return true
-                }
-
-                // Горизонтальные свайпы для переключения треков (любая область)
+                // Горизонтальные свайпы для переключения треков
                 if (abs(velocityX) > abs(velocityY) && abs(velocityX) > 500) {
                     if (velocityX < -500) {
                         // Свайп влево - следующий трек
@@ -555,7 +591,6 @@ class NowPlayingActivity : AppCompatActivity() {
                         return true
                     }
                 }
-
                 return false
             }
 
@@ -564,53 +599,63 @@ class NowPlayingActivity : AppCompatActivity() {
                 togglePlayPause()
                 return true
             }
-
-            override fun onScroll(
-                e1: MotionEvent?,
-                e2: MotionEvent,
-                distanceX: Float,
-                distanceY: Float
-            ): Boolean {
-                if (e1 == null || e2 == null) return false
-
-                val startX = e1.x
-                // Плавная регулировка громкости только в правой половине
-                if (startX > screenWidth / 2 && abs(distanceY) > abs(distanceX)) {
-                    val deltaY = e2.y - e1.y
-                    if (abs(deltaY) > 5) {
-                        // Инвертируем: свайп вверх (deltaY отрицательный) = увеличение
-                        val change = (-deltaY / 10).toInt()
-                        val newVolume = (currentVolume + change).coerceIn(0, 100)
-                        if (newVolume != currentVolume) {
-                            currentVolume = newVolume
-                            setVolume(currentVolume)
-                            showVolumeIndicator()
-                            Log.d(TAG, "Volume scroll: $currentVolume%")
-                        }
-                    }
-                    return true
-                }
-                return false
-            }
         })
 
-        // Вешаем обработчики на несколько элементов
+        // Устанавливаем обработчик касаний на контейнер с обложкой
         albumArtContainer.setOnTouchListener { _, event ->
+            // Сначала обрабатываем управление громкостью (правая половина экрана)
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    if (event.x > screenWidth / 2) {
+                        Log.d(TAG, "Volume touch started at y=${event.y}")
+                        isTouchingVolume = true
+                        touchStartY = event.y
+                        touchStartVolume = currentVolume
+                        showVolumeIndicator()
+                        return@setOnTouchListener true
+                    }
+                }
+
+                MotionEvent.ACTION_MOVE -> {
+                    if (isTouchingVolume) {
+                        // Рассчитываем изменение громкости на основе движения пальца
+                        val deltaY = touchStartY - event.y
+                        val volumeChange = (deltaY / screenHeight * 100).toInt()
+                        val newVolume = (touchStartVolume + volumeChange).coerceIn(0, 100)
+
+                        if (newVolume != currentVolume) {
+                            currentVolume = newVolume
+                            setVolumeImmediate(currentVolume)
+                            Log.d(TAG, "Volume changed to: $currentVolume%")
+                        }
+                        return@setOnTouchListener true
+                    }
+                }
+
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (isTouchingVolume) {
+                        Log.d(TAG, "Volume touch ended")
+                        isTouchingVolume = false
+                        // Индикатор скроется автоматически через таймер
+                        return@setOnTouchListener true
+                    }
+                }
+            }
+
+            // Если не обработано как управление громкостью, передаем в детектор жестов
             gestureDetector.onTouchEvent(event)
         }
 
+        // Также вешаем обработчик на playerInfo для увеличения области
         playerInfo.setOnTouchListener { _, event ->
             gestureDetector.onTouchEvent(event)
         }
 
-        playerControls.setOnTouchListener { _, event ->
-            gestureDetector.onTouchEvent(event)
-        }
+        Log.d(TAG, "Gesture detector setup complete")
     }
 
     private fun setupClickListeners() {
         backButton.setOnClickListener {
-            Log.d(TAG, "Back button clicked")
             finish()
             overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out)
         }
@@ -621,39 +666,31 @@ class NowPlayingActivity : AppCompatActivity() {
                 MusicService.RepeatMode.ALL -> MusicService.RepeatMode.ONE
                 MusicService.RepeatMode.ONE -> MusicService.RepeatMode.NONE
             }
-
             updateButtonStates()
 
-            when (repeatMode) {
-                MusicService.RepeatMode.NONE -> {
-                    Toast.makeText(this, "Повтор выключен", Toast.LENGTH_SHORT).show()
-                }
-                MusicService.RepeatMode.ALL -> {
-                    Toast.makeText(this, "Повтор всех треков", Toast.LENGTH_SHORT).show()
-                }
-                MusicService.RepeatMode.ONE -> {
-                    Toast.makeText(this, "Повтор одного трека", Toast.LENGTH_SHORT).show()
-                }
+            val message = when (repeatMode) {
+                MusicService.RepeatMode.NONE -> "Повтор выключен"
+                MusicService.RepeatMode.ALL -> "Повтор всех треков"
+                MusicService.RepeatMode.ONE -> "Повтор одного трека"
             }
+            Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
 
             musicService?.setRepeatMode(repeatMode)
-            Log.d(TAG, "Repeat mode set to: $repeatMode")
+            musicService?.savePlaybackState() // Сохраняем после изменения
         }
 
         shuffleButton.setOnClickListener {
-            Log.d(TAG, "Shuffle button clicked, current state: $isShuffleMode")
-
             isShuffleMode = !isShuffleMode
             updateButtonStates()
 
-            if (isShuffleMode) {
-                Toast.makeText(this, "Перемешивание включено", Toast.LENGTH_SHORT).show()
-            } else {
-                Toast.makeText(this, "Перемешивание выключено", Toast.LENGTH_SHORT).show()
-            }
+            Toast.makeText(
+                this,
+                if (isShuffleMode) "Перемешивание включено" else "Перемешивание выключено",
+                Toast.LENGTH_SHORT
+            ).show()
 
             musicService?.setShuffleMode(isShuffleMode)
-            Log.d(TAG, "Shuffle mode set to: $isShuffleMode")
+            musicService?.savePlaybackState() // Сохраняем после изменения
         }
 
         favoriteButton.setOnClickListener {
@@ -661,7 +698,7 @@ class NowPlayingActivity : AppCompatActivity() {
         }
 
         playerInfo.setOnClickListener {
-            musicService?.getCurrentTrack()?.let { track ->
+            currentTrack?.let { track ->
                 val intent = Intent(this, ArtistTracksActivity::class.java)
                 intent.putExtra("artist_name", track.artist)
                 startActivity(intent)
@@ -677,81 +714,82 @@ class NowPlayingActivity : AppCompatActivity() {
         musicService?.let { service ->
             if (service.isPlaying) {
                 service.pause()
-                playPauseButton.setImageResource(R.drawable.ic_play)
-                visualizer.isVisualizing = false
-                Log.d(TAG, "Paused")
             } else {
                 service.play()
-                playPauseButton.setImageResource(R.drawable.ic_pause)
-                visualizer.isVisualizing = true
-                Log.d(TAG, "Playing")
             }
         }
     }
 
     private fun previousTrack() {
         musicService?.playPrevious()
-        // Даем время на смену трека
-        handler.postDelayed({
-            musicService?.getAudioSessionId()?.let {
-                visualizer.setAudioSessionId(it)
-            }
-        }, 300)
-        Log.d(TAG, "Previous track")
     }
 
     private fun nextTrack() {
         musicService?.playNext()
-        handler.postDelayed({
-            musicService?.getAudioSessionId()?.let {
-                visualizer.setAudioSessionId(it)
-            }
-        }, 300)
-        Log.d(TAG, "Next track")
     }
 
     private fun toggleFavorite() {
-        val isFavorite = favoriteButton.tag == "favorite"
-        val icon = if (isFavorite) R.drawable.ic_favorite_border else R.drawable.ic_favorite
-        favoriteButton.setImageResource(icon)
-        favoriteButton.tag = if (isFavorite) "not_favorite" else "favorite"
+        currentTrack?.let { track ->
+            val newFavoriteState = favoriteButton.tag != "favorite"
 
-        val message = if (isFavorite) "Удалено из избранного" else "Добавлено в избранное"
-        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
-        Log.d(TAG, message)
+            // Обновляем иконку сразу для отзывчивости
+            updateFavoriteButton(newFavoriteState)
+
+            lifecycleScope.launch(Dispatchers.IO) {
+                try {
+                    if (newFavoriteState) {
+                        musicRepository.addToFavorites(track)
+                        withContext(Dispatchers.Main) {
+                            Toast.makeText(this@NowPlayingActivity, "❤️ Добавлено в избранное", Toast.LENGTH_SHORT).show()
+                        }
+                    } else {
+                        musicRepository.removeFromFavorites(track)
+                        withContext(Dispatchers.Main) {
+                            Toast.makeText(this@NowPlayingActivity, "♡ Удалено из избранного", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    track.isFavorite = newFavoriteState
+
+                    // Отправляем broadcast, чтобы MainActivity обновилась
+                    sendBroadcast(Intent("FAVORITE_UPDATED"))
+
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error toggling favorite", e)
+                    withContext(Dispatchers.Main) {
+                        updateFavoriteButton(!newFavoriteState)
+                    }
+                }
+            }
+        }
     }
 
     override fun onResume() {
         super.onResume()
-        Log.d(TAG, "onResume called")
-
-        musicService?.enableVisualizer(true)
-        visualizer.isVisualizing = true
-
-        syncStateWithService()
         updateUI()
+        syncStateWithService()
     }
 
     override fun onPause() {
         super.onPause()
-        Log.d(TAG, "onPause called")
-
-        musicService?.enableVisualizer(false)
-        visualizer.isVisualizing = false
+        musicService?.savePlaybackState()
     }
 
     override fun onDestroy() {
         super.onDestroy()
 
-        musicService?.enableVisualizer(false)
-        visualizer.release()
+        // Безопасно удаляем callbacks
+        volumeChangeRunnable?.let {
+            volumeChangeHandler.removeCallbacks(it)
+        }
+
+        musicService?.savePlaybackState()
 
         if (isBound) {
             unbindService(connection)
             isBound = false
         }
         handler.removeCallbacksAndMessages(null)
-        Log.d(TAG, "Activity destroyed")
+        visualizer.release()
     }
 
     override fun onBackPressed() {

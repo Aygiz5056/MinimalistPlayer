@@ -3,13 +3,13 @@ package com.example.minimalistplayer.ui.visualizer
 import android.content.Context
 import android.graphics.*
 import android.media.audiofx.Visualizer
+import android.os.Handler
+import android.os.Looper
 import android.util.AttributeSet
 import android.util.Log
 import android.view.View
 import kotlin.math.abs
-import kotlin.math.log10
-import kotlin.math.pow
-import kotlin.math.sin
+import kotlin.random.Random
 
 class AudioVisualizerView @JvmOverloads constructor(
     context: Context,
@@ -19,263 +19,300 @@ class AudioVisualizerView @JvmOverloads constructor(
 
     companion object {
         private const val TAG = "AudioVisualizerView"
-        private const val BAR_COUNT = 24
-        private const val MIN_AMPLITUDE = 0.05f
-        private const val SMOOTHING_FACTOR = 0.4f
+        private const val ANIMATION_BATCH_MAX = 10
     }
 
-    // Цвета
-    private val barColor = Color.parseColor("#FFFF4081")
-    private val barBackgroundColor = Color.parseColor("#33FFFFFF")
-
-    // Кисти
-    private val barPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = barColor
-        style = Paint.Style.FILL
-    }
-
-    private val barBackgroundPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = barBackgroundColor
-        style = Paint.Style.FILL
-    }
-
-    // Массивы амплитуд
-    private val amplitudes = FloatArray(BAR_COUNT) { MIN_AMPLITUDE }
-    private val targetAmplitudes = FloatArray(BAR_COUNT) { MIN_AMPLITUDE }
-    private val barSpeeds = FloatArray(BAR_COUNT) { 0.05f } // Скорость изменения каждой полоски
-
-    // Визуализатор
     private var visualizer: Visualizer? = null
-    private var isVisualizerActive = false
+    private var isVisualizerEnabled = false
     private var audioSessionId = 0
+    private var isTestMode = false
+    private var isPlaying = false  // изменено на false по умолчанию
 
-    // Флаг визуализации
-    var isVisualizing = false
+    // Добавляем свойство isVisualizing
+    var isVisualizing: Boolean = false
         set(value) {
             field = value
-            if (value) {
-                startVisualizer()
-            } else {
-                stopVisualizer()
-                amplitudes.fill(MIN_AMPLITUDE)
-                targetAmplitudes.fill(MIN_AMPLITUDE)
-                invalidate()
+            isPlaying = value
+            if (!value) {
+                // При выключении визуализации плавно опускаем полоски
+                for (i in srcY.indices) {
+                    srcY[i] = destY[i]
+                    destY[i] = height.toFloat()
+                }
+                animationBatchCount = 0
             }
         }
 
-    init {
-        startSmoothAnimation()
+    // Количество баров - фиксированное для красоты
+    private val barsCount = 24
+
+    // Данные для визуализации
+    private var rawAudioBytes: ByteArray? = null
+
+    // Позиции баров
+    private var srcY = FloatArray(barsCount)
+    private var destY = FloatArray(barsCount)
+
+    // Для анимации
+    private var animationBatchCount = 0
+    private val maxBatchCount = ANIMATION_BATCH_MAX
+
+    // Ширина бара
+    private var barWidth = -1f
+
+    // Фактор затухания (0-1)
+    private var fadeFactor = 1f
+    private val fadeSpeed = 0.08f
+
+    // Тёмно-бордовый цвет как в дизайне
+    private val barColor = Color.parseColor("#800020") // Бордовый
+
+    // Кисть
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        color = barColor
+        strokeWidth = 8f
+        strokeCap = Paint.Cap.ROUND
     }
 
-    private fun startSmoothAnimation() {
-        post(object : Runnable {
-            override fun run() {
-                // Плавно приближаем текущие амплитуды к целевым
-                for (i in amplitudes.indices) {
-                    // Каждая полоска движется с разной скоростью для эффекта пульсации
-                    val speed = barSpeeds[i]
-                    amplitudes[i] += (targetAmplitudes[i] - amplitudes[i]) * speed
+    // Случайный генератор
+    private val random = Random
 
-                    // Добавляем небольшую случайную вариацию
-                    if (!isVisualizerActive) {
-                        // В тестовом режиме создаем волны
-                        val time = System.currentTimeMillis() / 500.0
-                        val wave = (sin(time + i * 0.5) * 0.3 + 0.5).toFloat()
-                        targetAmplitudes[i] = wave
-                    }
-                }
-                invalidate()
-                postDelayed(this, 16)
+    private val handler = Handler(Looper.getMainLooper())
+
+    // Тестовый режим
+    private val testModeRunnable = object : Runnable {
+        override fun run() {
+            if (!isTestMode || !isPlaying) return
+
+            // Генерируем тестовые данные для красивого эффекта
+            val testData = ByteArray(512)
+            val time = System.currentTimeMillis() / 300.0
+            for (i in testData.indices) {
+                val value = (Math.sin(i * 0.1 + time) * 60 +
+                        Math.sin(i * 0.3 + time * 2) * 40 +
+                        random.nextInt(20) - 10).toInt()
+                testData[i] = value.coerceIn(-128, 127).toByte()
             }
-        })
+            rawAudioBytes = testData
+
+            handler.postDelayed(this, 50)
+        }
+    }
+
+    init {
+        initBars()
+        startTestMode()
+    }
+
+    private fun initBars() {
+        srcY = FloatArray(barsCount)
+        destY = FloatArray(barsCount)
+    }
+
+    fun setPlaying(playing: Boolean) {
+        if (isPlaying == playing) return
+        isPlaying = playing
+        if (!playing) {
+            // При паузе плавно опускаем полоски
+            for (i in srcY.indices) {
+                srcY[i] = destY[i]
+                destY[i] = height.toFloat()
+            }
+            animationBatchCount = 0
+        }
     }
 
     fun setAudioSessionId(sessionId: Int) {
-        // Теперь управление визуалайзером полностью в MusicService
-        // Этот метод можно оставить пустым или для совместимости
         Log.d(TAG, "setAudioSessionId: $sessionId")
-    }
-
-    /**
-     * Публичный метод для получения данных от Visualizer API
-     * Вызывается из NowPlayingActivity при получении данных от сервиса
-     */
-    fun updateVisualizerData(waveform: ByteArray) {
-        if (isVisualizing) {
-            processWaveformData(waveform)
+        audioSessionId = sessionId
+        stopTestMode()
+        if (sessionId != 0) {
+            initVisualizer()
+        } else {
+            startTestMode()
         }
     }
 
-    private fun startVisualizer() {
-        if (audioSessionId == 0) {
-            Log.w(TAG, "Cannot start visualizer: invalid audio session")
-            return
-        }
+    private fun startTestMode() {
+        if (isTestMode) return
 
-        try {
-            visualizer = Visualizer(audioSessionId)
+        Log.d(TAG, "Starting test mode")
+        isTestMode = true
+        isVisualizerEnabled = true
+        isPlaying = true
+        isVisualizing = true
 
-            val captureSizeRange = Visualizer.getCaptureSizeRange()
-            visualizer?.captureSize = captureSizeRange[1]
-
-            visualizer?.setDataCaptureListener(
-                object : Visualizer.OnDataCaptureListener {
-                    override fun onWaveFormDataCapture(
-                        visualizer: Visualizer?,
-                        waveform: ByteArray?,
-                        samplingRate: Int
-                    ) {
-                        if (isVisualizing && waveform != null) {
-                            processWaveformData(waveform)
-                        }
-                    }
-
-                    override fun onFftDataCapture(
-                        visualizer: Visualizer?,
-                        fft: ByteArray?,
-                        samplingRate: Int
-                    ) {}
-                },
-                Visualizer.getMaxCaptureRate() / 2,
-                true,
-                false
-            )
-
-            visualizer?.enabled = true
-            isVisualizerActive = true
-            Log.d(TAG, "Visualizer started successfully")
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error starting visualizer", e)
-            isVisualizerActive = false
-        }
-    }
-
-    private fun stopVisualizer() {
         try {
             visualizer?.enabled = false
             visualizer?.release()
-            visualizer = null
-            isVisualizerActive = false
         } catch (e: Exception) {
-            Log.e(TAG, "Error stopping visualizer", e)
+            // Игнорируем
+        }
+        visualizer = null
+
+        handler.post(testModeRunnable)
+    }
+
+    private fun stopTestMode() {
+        if (isTestMode) {
+            isTestMode = false
+            handler.removeCallbacks(testModeRunnable)
         }
     }
 
-    private fun processWaveformData(waveform: ByteArray) {
-        val waveformSize = waveform.size
-        val samplesPerBar = waveformSize / BAR_COUNT
+    private fun initVisualizer() {
+        try {
+            stopTestMode()
 
-        // Сначала собираем сырые данные
-        val rawAmplitudes = FloatArray(BAR_COUNT) { MIN_AMPLITUDE }
+            visualizer = Visualizer(audioSessionId).apply {
+                enabled = false
 
-        for (i in 0 until BAR_COUNT) {
-            var maxAmplitude = 0
-            var sumAmplitude = 0
-            var count = 0
+                val captureSize = Visualizer.getCaptureSizeRange()[1]
+                setCaptureSize(captureSize)
 
-            val startIdx = i * samplesPerBar
-            val endIdx = (i + 1) * samplesPerBar
+                setDataCaptureListener(
+                    object : Visualizer.OnDataCaptureListener {
+                        override fun onWaveFormDataCapture(
+                            visualizer: Visualizer,
+                            waveform: ByteArray,
+                            samplingRate: Int
+                        ) {
+                            if (isPlaying) {
+                                rawAudioBytes = waveform
+                            }
+                        }
 
-            for (j in startIdx until endIdx.coerceAtMost(waveformSize)) {
-                val absValue = abs(waveform[j].toInt())
-                if (absValue > maxAmplitude) {
-                    maxAmplitude = absValue
-                }
-                sumAmplitude += absValue
-                count++
+                        override fun onFftDataCapture(
+                            visualizer: Visualizer,
+                            fft: ByteArray,
+                            samplingRate: Int
+                        ) {
+                            // Не используем
+                        }
+                    },
+                    Visualizer.getMaxCaptureRate() / 2,
+                    true,
+                    false
+                )
+
+                enabled = true
+                isVisualizerEnabled = true
+                isVisualizing = true
+                Log.d(TAG, "Visualizer initialized successfully")
             }
-
-            // Используем комбинацию максимума и среднего для лучшего эффекта
-            val avgAmplitude = if (count > 0) sumAmplitude / count else 0
-            val combinedAmplitude = (maxAmplitude * 0.7f + avgAmplitude * 0.3f) / 128f
-
-            // Применяем логарифмическую шкалу
-            val logAmplitude = (log10(1.0 + 9.0 * combinedAmplitude)).toFloat()
-
-            // Сохраняем сырое значение
-            rawAmplitudes[i] = logAmplitude.coerceIn(MIN_AMPLITUDE, 1.0f)
-        }
-
-        // Добавляем эффект "бегущей волны" - соседние полоски влияют друг на друга
-        for (i in rawAmplitudes.indices) {
-            var smoothedValue = rawAmplitudes[i] * 0.5f
-
-            // Влияние соседей
-            if (i > 0) smoothedValue += rawAmplitudes[i - 1] * 0.25f
-            if (i < rawAmplitudes.size - 1) smoothedValue += rawAmplitudes[i + 1] * 0.25f
-
-            // Обновляем целевую амплитуду
-            targetAmplitudes[i] = smoothedValue.coerceIn(MIN_AMPLITUDE, 1.0f)
-
-            // Динамически меняем скорость в зависимости от изменения
-            val change = abs(targetAmplitudes[i] - amplitudes[i])
-            barSpeeds[i] = (0.3f + change * 0.5f).coerceIn(0.2f, 0.8f)
-        }
-    }
-
-    // Тестовый метод
-    fun updateTestAmplitude(amplitude: Float) {
-        if (!isVisualizerActive) {
-            // Создаем волнообразный паттерн
-            val time = System.currentTimeMillis() / 300.0
-            for (i in targetAmplitudes.indices) {
-                val freq = (i + 1) * 0.2f
-                val value = (sin(time * freq) * 0.5 + 0.5).toFloat()
-                targetAmplitudes[i] = value.coerceIn(MIN_AMPLITUDE, 1.0f)
-            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error initializing visualizer", e)
+            isVisualizerEnabled = false
+            startTestMode()
         }
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
-        val width = width.toFloat()
-        val height = height.toFloat()
+        if (width == 0 || height == 0) return
 
-        if (width == 0f || height == 0f) return
+        // Обновляем фактор затухания
+        val targetFade = if (isPlaying) 1f else 0f
+        fadeFactor += (targetFade - fadeFactor) * fadeSpeed
 
-        val spacing = width * 0.02f
-        val totalSpacing = spacing * (BAR_COUNT - 1)
-        val barWidth = (width - totalSpacing) / BAR_COUNT
+        // Инициализируем ширину бара при первом рисовании
+        if (barWidth == -1f) {
+            barWidth = width.toFloat() / barsCount
+            paint.strokeWidth = barWidth * 0.4f // Тонкие элегантные линии
 
-        for (i in 0 until BAR_COUNT) {
-            val left = i * (barWidth + spacing)
-            val right = left + barWidth
-
-            // Высота полоски от 15% до 95% высоты
-            val barHeight = height * (0.15f + amplitudes[i] * 0.8f)
-
-            // Рисуем фон
-            canvas.drawRect(
-                left,
-                height - 4.dpToPx(),
-                right,
-                height - 2.dpToPx(),
-                barBackgroundPaint
-            )
-
-            // Рисуем активную полоску
-            canvas.drawRect(
-                left,
-                height - barHeight,
-                right,
-                height - 2.dpToPx(),
-                barPaint
-            )
-
-            // Меняем прозрачность в зависимости от высоты
-            barPaint.alpha = (150 + (amplitudes[i] * 105).toInt()).coerceIn(150, 255)
+            // Инициализируем позиции баров
+            for (i in srcY.indices) {
+                val posY = height.toFloat()
+                srcY[i] = posY
+                destY[i] = posY
+            }
         }
 
-        barPaint.alpha = 255
-    }
+        // Обновляем позиции баров если есть данные
+        if (isVisualizerEnabled && rawAudioBytes != null && isPlaying) {
+            if (animationBatchCount == 0) {
+                // Сохраняем текущие позиции
+                for (i in srcY.indices) {
+                    srcY[i] = destY[i]
+                }
 
-    private fun Int.dpToPx(): Float {
-        return this * resources.displayMetrics.density
+                // Рассчитываем новые позиции
+                for (i in destY.indices) {
+                    val index = (i * rawAudioBytes!!.size / barsCount).coerceIn(0, rawAudioBytes!!.size - 1)
+                    val byteValue = abs(rawAudioBytes!![index].toInt())
+
+                    // Высота бара с красивыми пропорциями
+                    val barHeight = (byteValue * height / 256f).coerceIn(height * 0.1f, height * 0.9f)
+
+                    destY[i] = height - barHeight
+                }
+
+                // Добавляем случайные пики для живости
+                if (random.nextInt(100) > 80) {
+                    destY[random.nextInt(destY.size)] = height * 0.15f
+                }
+            }
+
+            animationBatchCount++
+        } else if (!isPlaying || fadeFactor < 0.1f) {
+            // При паузе линии плавно опускаются
+            val targetY = height.toFloat()
+
+            if (animationBatchCount == 0) {
+                for (i in srcY.indices) {
+                    srcY[i] = destY[i]
+                    destY[i] = targetY
+                }
+            }
+            animationBatchCount++
+        }
+
+        // Рисуем бары
+        for (i in srcY.indices) {
+            // Интерполируем позицию между src и dest
+            val progress = (animationBatchCount.toFloat() / maxBatchCount).coerceIn(0f, 1f)
+            val currentY = srcY[i] + (destY[i] - srcY[i]) * progress
+
+            // Применяем фактор затухания
+            val fadeY = currentY + (height.toFloat() - currentY) * (1f - fadeFactor)
+
+            // Позиция по X
+            val x = i * barWidth + barWidth / 2f
+
+            // Рисуем линию
+            canvas.drawLine(
+                x, height.toFloat(),
+                x, fadeY.coerceIn(0f, height.toFloat()),
+                paint
+            )
+        }
+
+        // Сбрасываем счетчик анимации
+        if (animationBatchCount >= maxBatchCount) {
+            animationBatchCount = 0
+        }
+
+        // Продолжаем перерисовку
+        invalidate()
     }
 
     fun release() {
-        stopVisualizer()
+        try {
+            visualizer?.enabled = false
+            visualizer?.release()
+        } catch (e: Exception) {
+            // Игнорируем
+        }
+        visualizer = null
+        isVisualizerEnabled = false
+        isTestMode = false
+        handler.removeCallbacks(testModeRunnable)
+    }
+
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+        release()
     }
 }

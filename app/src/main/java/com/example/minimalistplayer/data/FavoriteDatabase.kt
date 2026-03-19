@@ -8,16 +8,16 @@ import androidx.room.RoomDatabase
 @Database(
     entities = [
         FavoriteTrack::class,
-        Playlist::class,           // Добавили
-        PlaylistTrack::class       // Добавили
+        Playlist::class,           // Добавляем Playlist
+        PlaylistTrack::class       // Добавляем PlaylistTrack
     ],
-    version = 2,  // Увеличили версию!
+    version = 2,  // Увеличиваем версию!
     exportSchema = false
 )
 abstract class FavoriteDatabase : RoomDatabase() {
 
     abstract fun favoriteDao(): FavoriteDao
-    abstract fun playlistDao(): PlaylistDao  // Добавили
+    abstract fun playlistDao(): PlaylistDao  // Добавляем этот метод
 
     companion object {
         @Volatile
@@ -30,7 +30,7 @@ abstract class FavoriteDatabase : RoomDatabase() {
                     FavoriteDatabase::class.java,
                     "favorite_database"
                 )
-                    .fallbackToDestructiveMigration()  // Добавили для миграции
+                    .fallbackToDestructiveMigration()  // Важно для обновления версии!
                     .build()
                 INSTANCE = instance
                 instance

@@ -1,7 +1,6 @@
 package com.example.minimalistplayer.ui.main
 
 import android.view.LayoutInflater
-import android.view.View
 import android.view.ViewGroup
 import androidx.recyclerview.widget.RecyclerView
 import com.example.minimalistplayer.R
@@ -53,6 +52,7 @@ class TrackAdapter(
                 trackTitle.text = track.title
                 trackArtist.text = track.artist
 
+                // Устанавливаем иконку избранного
                 val favoriteIcon = if (track.isFavorite) {
                     R.drawable.ic_favorite
                 } else {
@@ -60,25 +60,22 @@ class TrackAdapter(
                 }
                 favoriteButton.setImageResource(favoriteIcon)
 
-                // Клик по всей карточке
+                // Обработка клика по всей карточке
                 root.setOnClickListener {
                     onItemClick(track)
                 }
 
-                // Долгое нажатие на всю карточку
+                // Долгое нажатие
                 root.setOnLongClickListener {
                     onItemLongClick(track)
                     true
                 }
 
-                // Клик по контейнеру с информацией (на случай если root не сработает)
-                trackInfoContainer.setOnClickListener {
-                    onItemClick(track)
-                }
-
-                // Клик по кнопке избранного (не должен перехватывать события карточки)
+                // Клик по кнопке избранного
                 favoriteButton.setOnClickListener {
                     track.isFavorite = !track.isFavorite
+                    val newIcon = if (track.isFavorite) R.drawable.ic_favorite else R.drawable.ic_favorite_border
+                    favoriteButton.setImageResource(newIcon)
                     onFavoriteClick(track, position)
                 }
             }

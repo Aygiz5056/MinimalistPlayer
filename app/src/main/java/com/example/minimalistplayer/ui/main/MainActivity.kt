@@ -1,21 +1,18 @@
 package com.example.minimalistplayer.ui.main
 
 import android.Manifest
-import android.content.ComponentName
-import android.content.Context
-import android.content.Intent
-import android.content.ServiceConnection
+import android.content.*
 import android.content.pm.PackageManager
-import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.View
-import android.view.ViewGroup
 import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
@@ -34,20 +31,23 @@ import com.example.minimalistplayer.data.MusicRepository
 import com.example.minimalistplayer.data.Playlist
 import com.example.minimalistplayer.data.Track
 import com.example.minimalistplayer.service.MusicService
-import com.example.minimalistplayer.ui.dialog.SleepTimerDialog
 import com.example.minimalistplayer.ui.nowplaying.NowPlayingActivity
 import com.example.minimalistplayer.ui.playlist.PlaylistActivity
 import com.example.minimalistplayer.ui.settings.SettingsActivity
+import com.example.minimalistplayer.ui.dialog.SleepTimerDialog
 import com.google.android.material.navigation.NavigationView
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlin.math.abs
-import androidx.core.app.ActivityCompat
-import androidx.core.app.ActivityOptionsCompat
+import java.io.File
 
 class MainActivity : AppCompatActivity() {
 
-    // Прямые ссылки на View вместо binding
+    companion object {
+        private const val TAG = "MainActivity"
+    }
+
+    // Прямые ссылки на View
     private lateinit var drawerLayout: DrawerLayout
     private lateinit var navigationView: NavigationView
     private lateinit var recyclerView: RecyclerView
@@ -55,10 +55,17 @@ class MainActivity : AppCompatActivity() {
     private lateinit var menuButton: ImageButton
     private lateinit var favoritesButton: ImageButton
     private lateinit var searchView: SearchView
+    private lateinit var appBarLayout: View
+    private lateinit var backgroundAlbumArt: ImageView
+    private lateinit var backgroundOverlay: View
+    private lateinit var loadingProgress: ProgressBar
 
     // Мини-плеер
-    private lateinit var miniPlayerTrackTitle: android.widget.TextView
-    private lateinit var miniPlayerProgressBar: android.widget.SeekBar
+    private var miniPlayerCard: View? = null
+    private var trackInfoContainer: View? = null
+    private lateinit var miniPlayerTrackTitle: TextView
+    private lateinit var currentTrackArtist: TextView
+    private lateinit var miniPlayerProgressBar: SeekBar
     private lateinit var miniPlayerPlayPause: ImageButton
     private lateinit var miniPlayerPrev: ImageButton
     private lateinit var miniPlayerNext: ImageButton
@@ -70,50 +77,53 @@ class MainActivity : AppCompatActivity() {
 
     private var allTracks = listOf<Track>()
     private var isShowingFavorites = false
+    private var shouldOpenDrawer = false
+    private var lastClickTime = 0L
 
     // Для связи с сервисом
     private var musicService: MusicService? = null
     private var isBound = false
 
-    private lateinit var backgroundAlbumArt: ImageView
-    private lateinit var backgroundOverlay: View
-
-    private var miniPlayerCard: androidx.cardview.widget.CardView? = null
-    private var trackInfoContainer: View? = null
-    private lateinit var currentTrackArtist: TextView
-
     private val connection = object : ServiceConnection {
-        // В connection.onServiceConnected:
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            Log.d(TAG, "Service connected")
             val binder = service as MusicService.MusicBinder
             musicService = binder.getService()
             isBound = true
-            Log.d("MainActivity", "Service connected")
 
             // Устанавливаем слушатель изменений
             musicService?.setOnTrackChangeListener(object : MusicService.OnTrackChangeListener {
                 override fun onTrackChanged(track: Track) {
                     runOnUiThread {
-                        updateMiniPlayerFromService()
+                        updateMiniPlayer(track)
                     }
                 }
 
                 override fun onPlayStateChanged(isPlaying: Boolean) {
                     runOnUiThread {
-                        // Обновляем иконку play/pause
                         val icon = if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play
                         miniPlayerPlayPause.setImageResource(icon)
                     }
                 }
             })
 
+            // Проверяем, инициализирован ли уже сервис
+            if (musicService?.isInitialized() == true) {
+                Log.d(TAG, "Service already initialized, restoring UI only")
+                updateMiniPlayerFromService()
+            } else if (allTracks.isNotEmpty()) {
+                // Сервис не инициализирован - восстанавливаем состояние
+                Log.d(TAG, "Service not initialized, restoring state")
+                musicService?.restorePlaybackState(allTracks)
+            }
+
             updateMiniPlayerFromService()
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
+            Log.d(TAG, "Service disconnected")
             musicService = null
             isBound = false
-            Log.d("MainActivity", "Service disconnected")
         }
     }
 
@@ -130,41 +140,14 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun logCurrentState() {
-        musicService?.let { service ->
-            Log.d("MainActivity", "Current state - Shuffle: ${service.shuffleMode}, Repeat: ${service.repeatMode}, Track: ${service.getCurrentTrack()?.title}")
-        }
-    }
-
-    private fun initViews() {
-        drawerLayout = findViewById(R.id.drawerLayout)
-        navigationView = findViewById(R.id.navigationView)
-        recyclerView = findViewById(R.id.recyclerView)
-        emptyView = findViewById(R.id.emptyView)
-        menuButton = findViewById(R.id.menuButton)
-        favoritesButton = findViewById(R.id.favoritesButton)
-        searchView = findViewById(R.id.searchView)
-
-        // Добавь эти две строки!
-        backgroundAlbumArt = findViewById(R.id.backgroundAlbumArt)
-        backgroundOverlay = findViewById(R.id.backgroundOverlay)
-
-        // Мини-плеер элементы
-        miniPlayerCard = findViewById(R.id.miniPlayerCard)
-        trackInfoContainer = findViewById(R.id.trackInfoContainer)
-        miniPlayerTrackTitle = findViewById(R.id.currentTrackTitle)
-        currentTrackArtist = findViewById(R.id.currentTrackArtist)
-        miniPlayerProgressBar = findViewById(R.id.progressBar)
-        miniPlayerPlayPause = findViewById(R.id.playPauseButton)
-        miniPlayerPrev = findViewById(R.id.prevButton)
-        miniPlayerNext = findViewById(R.id.nextButton)
-
-        try {
-            miniPlayerCard = findViewById(R.id.miniPlayerCard)
-            trackInfoContainer = findViewById(R.id.trackInfoContainer)
-        } catch (e: Exception) {
-            miniPlayerCard = null
-            trackInfoContainer = null
+    private val favoriteUpdateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == "FAVORITE_UPDATED") {
+                Log.d(TAG, "Favorite updated, refreshing list")
+                if (isShowingFavorites) {
+                    filterTracks()
+                }
+            }
         }
     }
 
@@ -181,23 +164,38 @@ class MainActivity : AppCompatActivity() {
         setupGestures()
         checkPermissions()
 
-        // Проверяем, нужно ли открыть меню
         if (intent.getBooleanExtra("open_drawer", false)) {
-            drawerLayout.openDrawer(navigationView)
-        }
-    }
-
-    override fun onNewIntent(intent: Intent?) {
-        super.onNewIntent(intent)
-        // Обрабатываем новые интенты, если Activity уже существует
-        if (intent?.getBooleanExtra("open_drawer", false) == true) {
             shouldOpenDrawer = true
         }
     }
 
+    private fun initViews() {
+        drawerLayout = findViewById(R.id.drawerLayout)
+        navigationView = findViewById(R.id.navigationView)
+        recyclerView = findViewById(R.id.recyclerView)
+        emptyView = findViewById(R.id.emptyView)
+        menuButton = findViewById(R.id.menuButton)
+        favoritesButton = findViewById(R.id.favoritesButton)
+        searchView = findViewById(R.id.searchView)
+        appBarLayout = findViewById(R.id.appBarLayout)
+        backgroundAlbumArt = findViewById(R.id.backgroundAlbumArt)
+        backgroundOverlay = findViewById(R.id.backgroundOverlay)
+        loadingProgress = findViewById(R.id.loadingProgress)
+
+        // Мини-плеер элементы
+        miniPlayerCard = findViewById(R.id.miniPlayerCard)
+        trackInfoContainer = findViewById(R.id.trackInfoContainer)
+        miniPlayerTrackTitle = findViewById(R.id.currentTrackTitle)
+        currentTrackArtist = findViewById(R.id.currentTrackArtist)
+        miniPlayerProgressBar = findViewById(R.id.progressBar)
+        miniPlayerPlayPause = findViewById(R.id.playPauseButton)
+        miniPlayerPrev = findViewById(R.id.prevButton)
+        miniPlayerNext = findViewById(R.id.nextButton)
+    }
+
     override fun onStart() {
         super.onStart()
-        Log.d("MainActivity", "onStart called")
+        Log.d(TAG, "onStart called")
         val intent = Intent(this, MusicService::class.java)
         startService(intent)
         bindService(intent, connection, Context.BIND_AUTO_CREATE)
@@ -205,70 +203,105 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        Log.d("MainActivity", "onResume called")
+        Log.d(TAG, "onResume called")
 
-        // При возврате на главный экран обновляем информацию о текущем треке
+        // Для Android 14+ нужно указать флаги
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(favoriteUpdateReceiver, IntentFilter("FAVORITE_UPDATED"), Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(favoriteUpdateReceiver, IntentFilter("FAVORITE_UPDATED"))
+        }
+
         updateMiniPlayerFromService()
 
-        // Проверяем, нужно ли открыть меню (при возврате с экрана песни)
         if (shouldOpenDrawer) {
             drawerLayout.openDrawer(navigationView)
             shouldOpenDrawer = false
         }
     }
 
-    // Добавим переменную
-    private var shouldOpenDrawer = false
+    // Обновляем onPause
     override fun onPause() {
         super.onPause()
-        Log.d("MainActivity", "onPause called")
+        Log.d(TAG, "onPause called")
+        try {
+            unregisterReceiver(favoriteUpdateReceiver)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error unregistering receiver", e)
+        }
+        musicService?.savePlaybackState()
     }
 
     override fun onStop() {
         super.onStop()
-        Log.d("MainActivity", "onStop called")
-        if (isBound) {
-            unbindService(connection)
-            isBound = false
+        Log.d(TAG, "onStop called")
+
+        // Сохраняем состояние
+        musicService?.savePlaybackState()
+
+        // Не отключаемся от сервиса, если музыка играет
+        if (musicService?.isPlaying == false) {
+            if (isBound) {
+                unbindService(connection)
+                isBound = false
+            }
         }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        Log.d("MainActivity", "onDestroy called")
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        if (intent?.getBooleanExtra("open_drawer", false) == true) {
+            shouldOpenDrawer = true
+        }
     }
 
     private fun setupUI() {
         trackAdapter = TrackAdapter(
             tracks = emptyList(),
             onItemClick = { track ->
-                // Только воспроизводим трек, НЕ переустанавливаем плейлист
-                musicService?.let { service ->
-                    // Устанавливаем плейлист ТОЛЬКО если его нет или он пустой
-                    if (service.getPlaylist().isEmpty()) {
-                        service.setPlaylist(allTracks, allTracks.indexOf(track))
-                    } else {
-                        // Если плейлист уже есть, просто переключаемся на выбранный трек
-                        service.playTrackAtPosition(allTracks.indexOf(track))
+                val currentTime = System.currentTimeMillis()
+                if (currentTime - lastClickTime < 500) return@TrackAdapter
+                lastClickTime = currentTime
+
+                Log.d(TAG, "Track clicked: ${track.title}")
+
+                if (!isBound || musicService == null) {
+                    Toast.makeText(this, "Плеер не готов", Toast.LENGTH_SHORT).show()
+                    return@TrackAdapter
+                }
+
+                try {
+                    val index = allTracks.indexOf(track)
+                    musicService?.let { service ->
+                        service.setPlaylist(allTracks, index)
+                        service.play()
+                        updateMiniPlayer(track)
                     }
-                    service.play()
-                    updateMiniPlayer(track)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error playing track", e)
                 }
             },
             onFavoriteClick = { track, position ->
                 lifecycleScope.launch {
-                    if (track.isFavorite) {
-                        musicRepository.addToFavorites(track)
-                        Toast.makeText(this@MainActivity, "Добавлено в избранное", Toast.LENGTH_SHORT).show()
-                    } else {
-                        musicRepository.removeFromFavorites(track)
-                        Toast.makeText(this@MainActivity, "Удалено из избранного", Toast.LENGTH_SHORT).show()
-                    }
+                    try {
+                        if (track.isFavorite) {
+                            musicRepository.addToFavorites(track)
+                            Toast.makeText(this@MainActivity, "❤️ Добавлено в избранное", Toast.LENGTH_SHORT).show()
+                        } else {
+                            musicRepository.removeFromFavorites(track)
+                            Toast.makeText(this@MainActivity, "♡ Удалено из избранного", Toast.LENGTH_SHORT).show()
+                        }
 
-                    trackAdapter.updateTrack(track, position)
+                        // Обновляем трек в списке
+                        trackAdapter.updateTrack(track, position)
 
-                    if (isShowingFavorites) {
-                        filterTracks()
+                        // Если мы в режиме показа избранного, обновляем список с правильной сортировкой
+                        if (isShowingFavorites) {
+                            filterTracks()
+                        }
+
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error saving favorite", e)
                     }
                 }
             },
@@ -292,12 +325,11 @@ class MainActivity : AppCompatActivity() {
                 R.drawable.ic_favorite_border
             }
             favoritesButton.setImageResource(icon)
-            filterTracks()
+            filterTracks() // Вызываем фильтр с текущим поисковым запросом
         }
 
         searchView.setOnQueryTextListener(object : SearchView.OnQueryTextListener {
             override fun onQueryTextSubmit(query: String?): Boolean = false
-
             override fun onQueryTextChange(newText: String?): Boolean {
                 filterTracks(newText)
                 return true
@@ -308,81 +340,33 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupMiniPlayer() {
-        Log.d("MainActivity", "Setting up mini player")
-
         // Клик по карточке плеера открывает экран песни
         miniPlayerCard?.setOnClickListener {
-            Log.d("MainActivity", "miniPlayerCard clicked")
             openNowPlaying()
         }
 
-        // Клик по информации о треке тоже открывает экран песни
         trackInfoContainer?.setOnClickListener {
-            Log.d("MainActivity", "trackInfoContainer clicked")
             openNowPlaying()
         }
 
-        // Обработка длинного нажатия на название - показать полный текст
-        miniPlayerTrackTitle.setOnLongClickListener {
-            musicService?.getCurrentTrack()?.let { track ->
-                showFullTextDialog("Название", track.title)
-            } ?: Toast.makeText(this@MainActivity, "Нет текущего трека", Toast.LENGTH_SHORT).show()
-            true
-        }
-
-        // Обработка длинного нажатия на исполнителя - показать полный текст
-        currentTrackArtist.setOnLongClickListener {
-            musicService?.getCurrentTrack()?.let { track ->
-                showFullTextDialog("Исполнитель", track.artist)
-            } ?: Toast.makeText(this@MainActivity, "Нет текущего трека", Toast.LENGTH_SHORT).show()
-            true
-        }
-
-        // Кнопка play/pause
         miniPlayerPlayPause.setOnClickListener {
-            try {
-                musicService?.let { service ->
-                    Log.d("MainActivity", "Play/Pause clicked")
-                    if (service.isPlaying) {
-                        service.pause()
-                        miniPlayerPlayPause.setImageResource(R.drawable.ic_play)
-                    } else {
-                        service.play()
-                        miniPlayerPlayPause.setImageResource(R.drawable.ic_pause)
-                    }
+            musicService?.let { service ->
+                if (service.isPlaying) {
+                    service.pause()
+                } else {
+                    service.play()
                 }
-            } catch (e: Exception) {
-                Log.e("MainActivity", "Error in play/pause", e)
             }
         }
 
-        // Кнопка предыдущий трек
         miniPlayerPrev.setOnClickListener {
-            try {
-                musicService?.let { service ->
-                    Log.d("MainActivity", "Previous clicked")
-                    service.playPrevious()
-                    updateMiniPlayerFromService()
-                }
-            } catch (e: Exception) {
-                Log.e("MainActivity", "Error in previous click", e)
-            }
+            musicService?.playPrevious()
         }
 
-        // Кнопка следующий трек
         miniPlayerNext.setOnClickListener {
-            try {
-                musicService?.let { service ->
-                    Log.d("MainActivity", "Next clicked")
-                    service.playNext()
-                    updateMiniPlayerFromService()
-                }
-            } catch (e: Exception) {
-                Log.e("MainActivity", "Error in next click", e)
-            }
+            musicService?.playNext()
         }
 
-        // Обработка ползунка
         miniPlayerProgressBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 if (fromUser) {
@@ -392,33 +376,13 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
+
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
 
         startProgressUpdate()
     }
-    // Вспомогательная функция для проверки, коснулись ли конкретного View
-    private fun isTouchOnView(event: MotionEvent, view: View?): Boolean {
-        if (view == null) return false
-
-        val location = IntArray(2)
-        view.getLocationOnScreen(location)
-        val viewX = location[0]
-        val viewY = location[1]
-        val viewWidth = view.width
-        val viewHeight = view.height
-
-        val touchX = event.rawX.toInt()
-        val touchY = event.rawY.toInt()
-
-        return touchX >= viewX && touchX <= viewX + viewWidth &&
-                touchY >= viewY && touchY <= viewY + viewHeight
-    }
-
-    // Добавьте в ресурсы (values/ids.xml) или используйте существующие id
-// <item name="touch_start_x" type="id"/>
-// <item name="touch_start_y" type="id"/>
 
     private fun startProgressUpdate() {
         Thread {
@@ -432,74 +396,23 @@ class MainActivity : AppCompatActivity() {
                                 val duration = service.getDuration()
                                 if (duration > 0) {
                                     val progress = (current * 100 / duration)
-                                    // Устанавливаем прогресс без вызова слушателя
                                     miniPlayerProgressBar.progress = progress
                                 }
                             }
                         }
                     }
                 } catch (e: Exception) {
-                    Log.e("MainActivity", "Error in progress update thread", e)
                     break
                 }
             }
         }.start()
     }
 
-    private fun showFullTextDialog(title: String, content: String) {
-        AlertDialog.Builder(this)
-            .setTitle(title)
-            .setMessage(content)
-            .setPositiveButton("OK", null)
-            .show()
-    }
-
-    private fun openNowPlaying() {
-        Log.d("MainActivity", "openNowPlaying called")
-
-        if (!isBound || musicService == null) {
-            Log.d("MainActivity", "Service not bound or null")
-            Toast.makeText(this, "Плеер не готов", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        try {
-            val currentTrack = musicService?.getCurrentTrack()
-            if (currentTrack == null) {
-                Log.d("MainActivity", "No current track")
-                Toast.makeText(this, "Нет текущего трека", Toast.LENGTH_SHORT).show()
-                return
-            }
-
-            Log.d("MainActivity", "Opening NowPlayingActivity for: ${currentTrack.title}")
-            val intent = Intent(this, NowPlayingActivity::class.java).apply {
-                putExtra("track_id", currentTrack.id)
-                putExtra("track_title", currentTrack.title)
-                putExtra("track_artist", currentTrack.artist)
-                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            }
-            startActivity(intent)
-            overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out)
-
-        } catch (e: Exception) {
-            Log.e("MainActivity", "Error opening NowPlayingActivity", e)
-            Toast.makeText(this, "Ошибка открытия плеера: ${e.message}", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun getCurrentTrack(): Track? {
-        return if (isBound && musicService != null) {
-            musicService?.getCurrentTrack()
-        } else {
-            null
-        }
-    }
-
     private fun updateMiniPlayer(track: Track) {
         miniPlayerTrackTitle.text = track.title
         currentTrackArtist.text = track.artist
-        miniPlayerPlayPause.setImageResource(R.drawable.ic_pause)
-        //updateBackgroundAlbumArt(track)
+        miniPlayerPlayPause.setImageResource(if (musicService?.isPlaying == true) R.drawable.ic_pause else R.drawable.ic_play)
+        updateBackgroundAlbumArt(track)
     }
 
     private fun updateMiniPlayerFromService() {
@@ -510,64 +423,35 @@ class MainActivity : AppCompatActivity() {
                 if (musicService?.isPlaying == true) R.drawable.ic_pause else R.drawable.ic_play
             )
             updateBackgroundAlbumArt(track)
+
+            // Логируем текущие режимы для отладки
+            Log.d(TAG, "Current modes - Repeat: ${musicService?.repeatMode}, Shuffle: ${musicService?.shuffleMode}")
         }
     }
 
     private fun updateBackgroundAlbumArt(track: Track?) {
-        if (!::backgroundAlbumArt.isInitialized || !::backgroundOverlay.isInitialized) {
-            return // если переменные не инициализированы, выходим
-        }
-
-        if (track == null) {
+        if (track == null || track.albumArtUri == null) {
             backgroundAlbumArt.visibility = View.GONE
             backgroundOverlay.visibility = View.GONE
             return
         }
 
-        if (track.albumArtUri != null) {
-            Glide.with(this)
-                .load(track.albumArtUri)
-                .centerCrop()
-                .into(backgroundAlbumArt)
+        Glide.with(this)
+            .load(track.albumArtUri)
+            .centerCrop()
+            .into(backgroundAlbumArt)
 
-            backgroundAlbumArt.visibility = View.VISIBLE
-            backgroundOverlay.visibility = View.VISIBLE
-        } else {
-            backgroundAlbumArt.visibility = View.GONE
-            backgroundOverlay.visibility = View.GONE
-        }
+        backgroundAlbumArt.visibility = View.VISIBLE
+        backgroundOverlay.visibility = View.VISIBLE
     }
 
     private fun setupDrawer() {
         navigationView.setNavigationItemSelectedListener { menuItem ->
             when (menuItem.itemId) {
-                R.id.nav_settings -> {
-                    startActivity(Intent(this, SettingsActivity::class.java))
-                }
-                R.id.nav_playlists -> {
-                    startActivity(Intent(this, PlaylistActivity::class.java))
-                }
-                R.id.nav_donate -> {
-                    openDonateLink()
-                }
-                R.id.nav_timer -> {
-                    if (isBound && musicService != null) {
-                        val timerDialog = SleepTimerDialog()
-                        timerDialog.setMusicService(musicService!!)
-                        timerDialog.setListener(object : SleepTimerDialog.SleepTimerListener {
-                            override fun onTimerSet(minutes: Int) {
-                                Toast.makeText(this@MainActivity, "Таймер установлен на $minutes мин", Toast.LENGTH_SHORT).show()
-                            }
-
-                            override fun onTimerCancel() {
-                                Toast.makeText(this@MainActivity, "Таймер отключен", Toast.LENGTH_SHORT).show()
-                            }
-                        })
-                        timerDialog.show(supportFragmentManager, SleepTimerDialog.TAG)
-                    } else {
-                        Toast.makeText(this, "Плеер не готов", Toast.LENGTH_SHORT).show()
-                    }
-                }
+                R.id.nav_settings -> startActivity(Intent(this, SettingsActivity::class.java))
+                R.id.nav_playlists -> startActivity(Intent(this, PlaylistActivity::class.java))
+                R.id.nav_donate -> openDonateLink()
+                R.id.nav_timer -> showTimerDialog()
             }
             drawerLayout.closeDrawers()
             true
@@ -576,73 +460,52 @@ class MainActivity : AppCompatActivity() {
 
     private fun openDonateLink() {
         try {
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.donationalerts.com/r/shedanhoolderz"))
-            startActivity(intent)
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.donationalerts.com/r/shedanhoolderz")))
         } catch (e: Exception) {
             Toast.makeText(this, "Не удалось открыть ссылку", Toast.LENGTH_SHORT).show()
         }
     }
 
+    private fun showTimerDialog() {
+        if (isBound && musicService != null) {
+            val timerDialog = SleepTimerDialog()
+            timerDialog.setMusicService(musicService!!)
+            timerDialog.setListener(object : SleepTimerDialog.SleepTimerListener {
+                override fun onTimerSet(minutes: Int) {
+                    Toast.makeText(this@MainActivity, "Таймер на $minutes мин", Toast.LENGTH_SHORT).show()
+                }
+
+                override fun onTimerCancel() {
+                    Toast.makeText(this@MainActivity, "Таймер отключен", Toast.LENGTH_SHORT).show()
+                }
+            })
+            timerDialog.show(supportFragmentManager, SleepTimerDialog.TAG)
+        } else {
+            Toast.makeText(this, "Плеер не готов", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     private fun setupGestures() {
         gestureDetector = GestureDetectorCompat(this, object : GestureDetector.SimpleOnGestureListener() {
-            override fun onFling(
-                e1: MotionEvent?,
-                e2: MotionEvent,
-                velocityX: Float,
-                velocityY: Float
-            ): Boolean {
-                // Проверяем, открыто ли меню
-                if (drawerLayout.isDrawerOpen(navigationView)) {
-                    return false
+            override fun onFling(e1: MotionEvent?, e2: MotionEvent, velocityX: Float, velocityY: Float): Boolean {
+                if (drawerLayout.isDrawerOpen(navigationView)) return false
+
+                if (abs(velocityX) > abs(velocityY)) {
+                    if (velocityX < -500) {
+                        openNowPlaying()
+                        return true
+                    } else if (velocityX > 500) {
+                        drawerLayout.openDrawer(navigationView)
+                        return true
+                    }
                 }
-
-                // Получаем координаты начала касания
-                val startY = e1?.y ?: return false
-
-                // Получаем высоту верхней панели и мини-плеера
-                val appBarHeight = findViewById<View>(R.id.appBarLayout)?.height ?: 0
-                val miniPlayerHeight = miniPlayerCard?.height ?: 0
-                val screenHeight = resources.displayMetrics.heightPixels
-
-                // Область для свайпов (исключаем верхнюю панель и мини-плеер)
-                val topMargin = dpToPx(20)
-                val bottomMargin = dpToPx(20)
-
-                val isInSwipeArea = startY > (appBarHeight + topMargin) &&
-                        startY < (screenHeight - miniPlayerHeight - bottomMargin)
-
-                if (!isInSwipeArea) {
-                    Log.d("MainActivity", "Swipe outside allowed area: y=$startY")
-                    return false
-                }
-
-                // Свайп влево - открываем экран песни
-                if (abs(velocityX) > abs(velocityY) && velocityX < -300) {
-                    Log.d("MainActivity", "Swipe left detected")
-                    openNowPlaying()
-                    return true
-                }
-
-                // Свайп вправо - открываем боковое меню
-                if (abs(velocityX) > abs(velocityY) && velocityX > 300) {
-                    Log.d("MainActivity", "Swipe right detected - opening drawer")
-                    drawerLayout.openDrawer(navigationView)
-                    return true
-                }
-
                 return false
             }
         })
 
-        // Вешаем обработчик на recyclerView
         recyclerView.setOnTouchListener { _, event ->
             gestureDetector.onTouchEvent(event)
         }
-    }
-
-    // Добавьте этот метод в класс MainActivity
-    private fun dpToPx(dp: Int): Int {
-        return (dp * resources.displayMetrics.density).toInt()
     }
 
     private fun checkPermissions() {
@@ -652,80 +515,99 @@ class MainActivity : AppCompatActivity() {
             Manifest.permission.READ_EXTERNAL_STORAGE
         }
 
-        when {
-            ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED -> {
-                loadMusic()
-            }
-            else -> {
-                requestPermissionLauncher.launch(permission)
-            }
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                requestPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-            }
+        if (ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED) {
+            loadMusic()
+        } else {
+            requestPermissionLauncher.launch(permission)
         }
     }
 
     private fun loadMusic() {
         lifecycleScope.launch {
             try {
-                val tracks = musicRepository.getAllTracks()
-                allTracks = tracks
+                showLoading(true)
+                allTracks = musicRepository.getAllTracks()
 
-                // Логируем статистику по обложкам
-                val tracksWithArt = tracks.count { it.albumArtUri != null }
-                Log.d("MainActivity", "Loaded ${tracks.size} tracks, $tracksWithArt have album art")
-
-                if (tracks.isEmpty()) {
+                if (allTracks.isEmpty()) {
                     showEmptyView(true)
                     allTracks = musicRepository.getMockTracks()
-                    trackAdapter.updateTracks(allTracks)
-
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Реальная музыка не найдена, показываем тестовые треки",
-                        Toast.LENGTH_LONG
-                    ).show()
                 } else {
                     showEmptyView(false)
-                    trackAdapter.updateTracks(tracks)
                 }
 
-                if (isBound) {
-                    musicService?.setPlaylist(allTracks, 0)
+                trackAdapter.updateTracks(allTracks)
+
+                // Устанавливаем плейлист ТОЛЬКО если сервис еще не инициализирован
+                if (isBound && musicService != null && musicService?.isInitialized() == false) {
+                    Log.d(TAG, "Setting playlist from loadMusic")
+                    musicService?.restorePlaybackState(allTracks)
                 }
+
+                showLoading(false)
 
             } catch (e: Exception) {
-                Log.e("MainActivity", "Ошибка загрузки музыки", e)
+                Log.e(TAG, "Error loading music", e)
                 showEmptyView(true)
-                Toast.makeText(
-                    this@MainActivity,
-                    "Ошибка загрузки: ${e.message}",
-                    Toast.LENGTH_SHORT
-                ).show()
+                showLoading(false)
             }
         }
     }
 
+    /**
+     * Показывает или скрывает пустой экран
+     */
     private fun showEmptyView(show: Boolean) {
-        if (show) {
-            emptyView.visibility = View.VISIBLE
-            recyclerView.visibility = View.GONE
-        } else {
-            emptyView.visibility = View.GONE
-            recyclerView.visibility = View.VISIBLE
-        }
+        emptyView.visibility = if (show) View.VISIBLE else View.GONE
+        recyclerView.visibility = if (show) View.GONE else View.VISIBLE
     }
 
-    private fun filterTracks(query: String? = null) {
-        var filtered = allTracks
+    private fun showLoading(show: Boolean) {
+        loadingProgress.visibility = if (show) View.VISIBLE else View.GONE
+    }
 
+    /**
+     * Фильтрует список треков по избранному и поисковому запросу
+     */
+    private fun filterTracks(query: String? = null) {
+        // Режим показа избранного
         if (isShowingFavorites) {
-            filtered = filtered.filter { it.isFavorite }
+            lifecycleScope.launch {
+                try {
+                    // Получаем упорядоченный список ID избранных треков
+                    val favoriteIds = musicRepository.getFavoriteIdsOrdered()
+
+                    // Сортируем все треки в том же порядке, что и favoriteIds
+                    val sortedFavorites = favoriteIds.mapNotNull { id ->
+                        allTracks.find { it.id == id }
+                    }
+
+                    var filtered = sortedFavorites
+
+                    // Применяем поиск если есть запрос
+                    if (!query.isNullOrBlank()) {
+                        filtered = filtered.filter {
+                            it.title.contains(query, ignoreCase = true) ||
+                                    it.artist.contains(query, ignoreCase = true)
+                        }
+                    }
+
+                    // Обновляем адаптер
+                    trackAdapter.updateTracks(filtered)
+                    showEmptyView(filtered.isEmpty())
+
+                    Log.d(TAG, "Filtered favorites: ${filtered.size} tracks")
+
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error filtering favorites", e)
+                }
+            }
+            return
         }
 
+        // Обычный режим (не избранное)
+        var filtered = allTracks
+
+        // Применяем поиск если есть запрос
         if (!query.isNullOrBlank()) {
             filtered = filtered.filter {
                 it.title.contains(query, ignoreCase = true) ||
@@ -733,8 +615,23 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Обновляем адаптер
         trackAdapter.updateTracks(filtered)
         showEmptyView(filtered.isEmpty())
+
+        Log.d(TAG, "Filtered all tracks: ${filtered.size} tracks")
+    }
+
+    private fun openNowPlaying() {
+        musicService?.getCurrentTrack()?.let { track ->
+            val intent = Intent(this, NowPlayingActivity::class.java).apply {
+                putExtra("track_id", track.id)
+                putExtra("track_title", track.title)
+                putExtra("track_artist", track.artist)
+            }
+            startActivity(intent)
+            overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out)
+        } ?: Toast.makeText(this, "Нет текущего трека", Toast.LENGTH_SHORT).show()
     }
 
     private fun showAddToPlaylistDialog(track: Track) {
@@ -798,17 +695,7 @@ class MainActivity : AppCompatActivity() {
             val playlist = Playlist(name = name)
             val playlistId = database.playlistDao().insert(playlist)
             addTrackToPlaylist(playlistId, track.id)
-            Toast.makeText(this@MainActivity, "Плейлист создан и трек добавлен", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    companion object {
-        private fun showFullTextDialog(mainActivity: MainActivity, title: String, content: String) {
-            AlertDialog.Builder(mainActivity)
-                .setTitle(title)
-                .setMessage(content)
-                .setPositiveButton("OK", null)
-                .show()
+            Toast.makeText(this@MainActivity, "Плейлист создан", Toast.LENGTH_SHORT).show()
         }
     }
 }

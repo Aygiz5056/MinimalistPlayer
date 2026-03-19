@@ -38,7 +38,6 @@ interface PlaylistDao {
         )
         insertPlaylistTrack(playlistTrack)
 
-        // Обновляем счетчик треков в плейлисте
         val count = getTrackCount(playlistId)
         val playlist = getPlaylist(playlistId)
         playlist?.let {
@@ -54,7 +53,4 @@ interface PlaylistDao {
 
     @Query("SELECT trackId FROM playlist_tracks WHERE playlistId = :playlistId ORDER BY position ASC")
     suspend fun getTrackIdsInPlaylist(playlistId: Long): List<Long>
-
-    @Query("DELETE FROM playlist_tracks WHERE playlistId = :playlistId")
-    suspend fun clearPlaylist(playlistId: Long)
 }

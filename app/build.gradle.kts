@@ -89,6 +89,8 @@ dependencies {
 
     // Если используешь поддержку старых версий
     implementation("jp.co.cyberagent.android:gpuimage:2.1.0")
+
+    implementation("androidx.preference:preference-ktx:1.2.0")
 }
 
 // Принудительно указываем версию Kotlin

@@ -7,10 +7,10 @@ data class Track(
     val title: String,
     val artist: String,
     val album: String,
-    val duration: Long, // в миллисекундах
-    val path: String,   // путь к файлу
+    val duration: Long,
+    val path: String,
     val albumArtUri: Uri?,
-    var isFavorite: Boolean = false  // Это поле НЕ сохраняется в БД, только для UI
+    var isFavorite: Boolean = false
 ) {
     fun getFormattedDuration(): String {
         val seconds = (duration / 1000) % 60
@@ -24,7 +24,6 @@ data class Track(
         }
     }
 
-    // Конвертация в FavoriteTrack для сохранения
     fun toFavoriteTrack(): FavoriteTrack {
         return FavoriteTrack(
             trackId = id,

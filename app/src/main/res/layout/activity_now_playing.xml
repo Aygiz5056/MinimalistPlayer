@@ -233,20 +233,21 @@
 
     </LinearLayout>
 
-    <!-- Индикатор громкости (вертикальный) -->
+    <!-- Индикатор громкости (вертикальный) - смещен вверх и вправо -->
     <FrameLayout
         android:id="@+id/volumeIndicator"
-        android:layout_width="60dp"
-        android:layout_height="200dp"
+        android:layout_width="70dp"
+        android:layout_height="220dp"
         android:visibility="gone"
         android:elevation="10dp"
         android:background="@drawable/bg_volume_indicator"
-        android:padding="8dp"
+        android:padding="12dp"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintHorizontal_bias="0.85">
+        app:layout_constraintHorizontal_bias="0.9"
+        app:layout_constraintVertical_bias="0.4"> <!-- Смещаем вверх -->
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -254,7 +255,7 @@
             android:orientation="vertical"
             android:gravity="center_horizontal">
 
-            <!-- Иконка громкости СВЕРХУ -->
+            <!-- Иконка громкости -->
             <ImageView
                 android:id="@+id/volumeIcon"
                 android:layout_width="32dp"
@@ -270,14 +271,14 @@
                 android:layout_width="8dp"
                 android:layout_height="0dp"
                 android:layout_weight="1"
-                android:layout_marginTop="8dp"
-                android:layout_marginBottom="8dp"
+                android:layout_marginTop="12dp"
+                android:layout_marginBottom="12dp"
                 android:max="100"
                 android:progress="50"
                 android:progressDrawable="@drawable/volume_progress_vertical"
                 android:rotation="0" />
 
-            <!-- Текст с процентами (опционально) -->
+            <!-- Текст с процентами -->
             <TextView
                 android:id="@+id/volumePercent"
                 android:layout_width="wrap_content"
@@ -285,7 +286,7 @@
                 android:layout_marginBottom="8dp"
                 android:text="50%"
                 android:textColor="#FFFF4081"
-                android:textSize="12sp"
+                android:textSize="14sp"
                 android:textStyle="bold" />
 
         </LinearLayout>

@@ -9,7 +9,7 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface FavoriteDao {
 
-    @Query("SELECT * FROM favorites ORDER BY addedAt DESC")
+    @Query("SELECT * FROM favorites ORDER BY addedAt ASC")  // ASC = новые в конце
     fun getAllFavorites(): Flow<List<FavoriteTrack>>
 
     @Query("SELECT * FROM favorites WHERE trackId = :trackId")

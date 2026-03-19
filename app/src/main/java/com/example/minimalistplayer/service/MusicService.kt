@@ -1,18 +1,15 @@
 package com.example.minimalistplayer.service
 
-import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
+import android.content.*
 import android.media.AudioManager
 import android.media.MediaPlayer
-import android.media.audiofx.Visualizer
-import android.os.*
+import android.os.Binder
+import android.os.Build
+import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.minimalistplayer.R
@@ -20,8 +17,9 @@ import com.example.minimalistplayer.data.Track
 import com.example.minimalistplayer.ui.main.MainActivity
 import com.example.minimalistplayer.ui.nowplaying.NowPlayingActivity
 import java.io.IOException
-import kotlin.math.abs
 import kotlin.random.Random
+import android.content.SharedPreferences
+import androidx.core.content.edit
 
 class MusicService : Service() {
 
@@ -38,7 +36,7 @@ class MusicService : Service() {
         ONE         // повтор одного
     }
 
-    // Интерфейс для слушателей
+    // Интерфейс для слушателей изменений
     interface OnTrackChangeListener {
         fun onTrackChanged(track: Track)
         fun onPlayStateChanged(isPlaying: Boolean)
@@ -64,7 +62,7 @@ class MusicService : Service() {
     var isPrepared = false
         private set
 
-    // Режимы воспроизведения - ОБЪЯВЛЯЕМ КАК СВОЙСТВА
+    // Режимы воспроизведения
     var repeatMode: RepeatMode = RepeatMode.NONE
         private set
 
@@ -76,8 +74,6 @@ class MusicService : Service() {
     private var onCompletionListener: (() -> Unit)? = null
     private var onErrorListener: ((String) -> Unit)? = null
     private var trackChangeListener: OnTrackChangeListener? = null
-    private var visualizer: Visualizer? = null
-    private var isVisualizerEnabled = false
 
     // AudioManager для аудиофокуса
     private val audioManager by lazy {
@@ -86,22 +82,10 @@ class MusicService : Service() {
 
     private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
         when (focusChange) {
-            AudioManager.AUDIOFOCUS_LOSS -> {
-                Log.d(TAG, "Audio focus loss")
-                pause()
-            }
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                Log.d(TAG, "Audio focus loss transient")
-                pause()
-            }
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                Log.d(TAG, "Audio focus loss transient can duck")
-                mediaPlayer?.setVolume(0.3f, 0.3f)
-            }
-            AudioManager.AUDIOFOCUS_GAIN -> {
-                Log.d(TAG, "Audio focus gain")
-                mediaPlayer?.setVolume(1.0f, 1.0f)
-            }
+            AudioManager.AUDIOFOCUS_LOSS -> pause()
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> pause()
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> mediaPlayer?.setVolume(0.3f, 0.3f)
+            AudioManager.AUDIOFOCUS_GAIN -> mediaPlayer?.setVolume(1.0f, 1.0f)
         }
     }
 
@@ -115,37 +99,124 @@ class MusicService : Service() {
         }
     }
 
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var isServiceInitialized = false
+
     inner class MusicBinder : Binder() {
         fun getService(): MusicService = this@MusicService
     }
 
+    // Добавьте переменные:
+    private lateinit var prefs: SharedPreferences
+    private val PREFS_NAME = "music_player_prefs"
+    private val KEY_LAST_TRACK_ID = "last_track_id"
+    private val KEY_LAST_POSITION = "last_position"
+    private val KEY_WAS_PLAYING = "was_playing"
+
+    // В onCreate():
     override fun onCreate() {
         super.onCreate()
+        prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         Log.d(TAG, "MusicService создан")
         initMediaPlayer()
         createNotificationChannel()
-
-        registerReceiver(
-            noisyReceiver,
-            IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
-        )
+        registerReceiver(noisyReceiver, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY))
     }
 
-    // В методе initMediaPlayer():
+    // Сохранение состояния
+// Добавим ключи для сохранения
+    private val KEY_REPEAT_MODE = "repeat_mode"
+    private val KEY_SHUFFLE_MODE = "shuffle_mode"
+
+    // В метод savePlaybackState() добавим сохранение режимов
+    fun savePlaybackState() {
+        prefs.edit {
+            putLong(KEY_LAST_TRACK_ID, currentTrack?.id ?: -1)
+            putInt(KEY_LAST_POSITION, getCurrentPosition())
+            putBoolean(KEY_WAS_PLAYING, isPlaying)
+            putInt(KEY_REPEAT_MODE, repeatMode.ordinal)  // Сохраняем repeatMode
+            putBoolean(KEY_SHUFFLE_MODE, shuffleMode)     // Сохраняем shuffleMode
+        }
+        Log.d(TAG, "Saved: track=${currentTrack?.id}, pos=${getCurrentPosition()}, " +
+                "playing=$isPlaying, repeat=$repeatMode, shuffle=$shuffleMode")
+    }
+
+    // В метод loadPlaybackState() добавим загрузку режимов
+    fun loadPlaybackState(): PlaybackState {
+        val trackId = prefs.getLong(KEY_LAST_TRACK_ID, -1)
+        val position = prefs.getInt(KEY_LAST_POSITION, 0)
+        val wasPlaying = prefs.getBoolean(KEY_WAS_PLAYING, false)
+
+        // Загружаем режимы
+        val repeatOrdinal = prefs.getInt(KEY_REPEAT_MODE, RepeatMode.NONE.ordinal)
+        val shuffle = prefs.getBoolean(KEY_SHUFFLE_MODE, false)
+
+        // Преобразуем ordinal обратно в enum
+        val repeat = when(repeatOrdinal) {
+            0 -> RepeatMode.NONE
+            1 -> RepeatMode.ALL
+            2 -> RepeatMode.ONE
+            else -> RepeatMode.NONE
+        }
+
+        return PlaybackState(trackId, position, wasPlaying, repeat, shuffle)
+    }
+
+    // Создадим data class для состояния
+    data class PlaybackState(
+        val trackId: Long,
+        val position: Int,
+        val wasPlaying: Boolean,
+        val repeatMode: RepeatMode,
+        val shuffleMode: Boolean
+    )
+
+    // Обновим restorePlaybackState
+    fun restorePlaybackState(tracks: List<Track>) {
+        if (isServiceInitialized && playlist.isNotEmpty()) {
+            Log.d(TAG, "Service already initialized, skipping restore")
+            return
+        }
+
+        val state = loadPlaybackState()
+
+        // Восстанавливаем режимы
+        setRepeatMode(state.repeatMode)
+        setShuffleMode(state.shuffleMode)
+
+        if (state.trackId != -1L) {
+            val index = tracks.indexOfFirst { it.id == state.trackId }
+            if (index != -1) {
+                setPlaylist(tracks, index)
+
+                handler.postDelayed({
+                    seekTo(state.position)
+
+                    if (state.wasPlaying) {
+                        play()
+                    }
+                    Log.d(TAG, "Restored: track=${currentTrack?.title}, pos=${state.position}, " +
+                            "playing=${state.wasPlaying}, repeat=${state.repeatMode}, shuffle=${state.shuffleMode}")
+                }, 500)
+            } else {
+                setPlaylist(tracks, 0)
+            }
+        } else {
+            setPlaylist(tracks, 0)
+        }
+    }
+
     private fun initMediaPlayer() {
         mediaPlayer = MediaPlayer().apply {
-            // Явно указываем создать новую аудиосессию
-            setAudioSessionId(AudioManager.AUDIO_SESSION_ID_GENERATE)
-
             setOnPreparedListener {
                 this@MusicService.isPrepared = true
-                Log.d(TAG, "MediaPlayer prepared, audio session: ${this.audioSessionId}")
+                Log.d(TAG, "MediaPlayer подготовлен")
                 onPreparedListener?.invoke()
                 showNotification()
             }
 
             setOnCompletionListener {
-                Log.d(TAG, "Track completed, audio session: ${this.audioSessionId}")
+                Log.d(TAG, "Трек завершен")
                 this@MusicService.isPlaying = false
                 trackChangeListener?.onPlayStateChanged(false)
                 onCompletionListener?.invoke()
@@ -153,192 +224,11 @@ class MusicService : Service() {
             }
 
             setOnErrorListener { _, what, extra ->
-                Log.e(TAG, "Error MediaPlayer: what=$what, extra=$extra")
+                Log.e(TAG, "Ошибка MediaPlayer: what=$what, extra=$extra")
                 onErrorListener?.invoke("Ошибка воспроизведения: $what")
                 true
             }
         }
-    }
-
-    // Метод getAudioSessionId():
-    fun getAudioSessionId(): Int {
-        return mediaPlayer?.audioSessionId ?: 0
-    }
-
-    // И добавим метод для принудительного создания аудиосессии
-    private fun ensureAudioSession() {
-        if (mediaPlayer == null) return
-
-        try {
-            // Если сессия не создана, создаем новую
-            if (mediaPlayer?.audioSessionId == 0) {
-                mediaPlayer?.setAudioSessionId(AudioManager.AUDIO_SESSION_ID_GENERATE)
-                Log.d(TAG, "Generated new audio session: ${mediaPlayer?.audioSessionId}")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error ensuring audio session", e)
-        }
-    }
-
-    // Добавим интерфейс для передачи данных
-    interface VisualizerDataListener {
-        fun onWaveformData(waveform: ByteArray)
-    }
-
-    private var visualizerListener: VisualizerDataListener? = null
-
-    fun setVisualizerListener(listener: VisualizerDataListener) {
-        visualizerListener = listener
-        setupVisualizer()
-    }
-
-    fun enableVisualizer(enable: Boolean) {
-        isVisualizerEnabled = enable
-        if (enable) {
-            startVisualizer()
-        } else {
-            stopVisualizer()
-        }
-    }
-
-    private fun startVisualizer() {
-        try {
-            val sessionId = mediaPlayer?.audioSessionId ?: return
-            if (sessionId == 0) return
-
-            stopVisualizer() // Останавливаем предыдущий
-
-            visualizer = Visualizer(sessionId)
-            visualizer?.captureSize = Visualizer.getCaptureSizeRange()[1]
-
-            visualizer?.setDataCaptureListener(
-                object : Visualizer.OnDataCaptureListener {
-                    override fun onWaveFormDataCapture(
-                        visualizer: Visualizer?,
-                        waveform: ByteArray?,
-                        samplingRate: Int
-                    ) {
-                        if (isVisualizerEnabled && waveform != null) {
-                            visualizerListener?.onWaveformData(waveform)
-                        }
-                    }
-
-                    override fun onFftDataCapture(
-                        visualizer: Visualizer?,
-                        fft: ByteArray?,
-                        samplingRate: Int
-                    ) {}
-                },
-                Visualizer.getMaxCaptureRate() / 2,
-                true,
-                false
-            )
-
-            visualizer?.enabled = true
-            Log.d(TAG, "Visualizer started for session: $sessionId")
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error starting visualizer", e)
-        }
-    }
-
-    private fun stopVisualizer() {
-        try {
-            visualizer?.enabled = false
-            visualizer?.release()
-            visualizer = null
-        } catch (e: Exception) {
-            Log.e(TAG, "Error stopping visualizer", e)
-        }
-    }
-
-    // В методе prepareTrack() временно отключаем визуалайзер
-    private fun prepareTrack(track: Track) {
-        try {
-            // Останавливаем визуалайзер на время подготовки
-            val wasVisualizerEnabled = isVisualizerEnabled
-            if (wasVisualizerEnabled) {
-                stopVisualizer()
-            }
-
-            mediaPlayer?.reset()
-            mediaPlayer?.setDataSource(track.path)
-            mediaPlayer?.prepareAsync()
-            currentTrack = track
-            isPrepared = false
-            isPlaying = false
-
-            Log.d(TAG, "Подготовка трека: ${track.title}")
-
-            // Уведомляем о смене трека
-            trackChangeListener?.onTrackChanged(track)
-            trackChangeListener?.onPlayStateChanged(false)
-
-            // Возвращаем визуалайзер после подготовки
-            if (wasVisualizerEnabled) {
-                Handler(Looper.getMainLooper()).postDelayed({
-                    startVisualizer()
-                }, 500)
-            }
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Ошибка подготовки трека", e)
-        }
-    }
-
-    private fun setupVisualizer() {
-        try {
-            // Получаем аудиосессию от MediaPlayer
-            val audioSessionId = mediaPlayer?.audioSessionId ?: return
-            Log.d(TAG, "Setting up visualizer for session: $audioSessionId")
-
-            // Создаем визуализатор
-            visualizer = Visualizer(audioSessionId)
-
-            // Устанавливаем размер захвата (максимальный)
-            val captureSizeRange = Visualizer.getCaptureSizeRange()
-            visualizer?.captureSize = captureSizeRange[1]
-
-            // Устанавливаем слушатель
-            visualizer?.setDataCaptureListener(
-                object : Visualizer.OnDataCaptureListener {
-                    override fun onWaveFormDataCapture(
-                        visualizer: Visualizer?,
-                        waveform: ByteArray?,
-                        samplingRate: Int
-                    ) {
-                        // Отправляем данные в активность
-                        waveform?.let {
-                            visualizerListener?.onWaveformData(it)
-                        }
-                    }
-
-                    override fun onFftDataCapture(
-                        visualizer: Visualizer?,
-                        fft: ByteArray?,
-                        samplingRate: Int
-                    ) {
-                        // Не используем
-                    }
-                },
-                Visualizer.getMaxCaptureRate() / 2, // Обновление 30 раз в секунду
-                true,  // Включить waveform
-                false  // Отключить FFT
-            )
-
-            // Включаем визуализатор
-            visualizer?.enabled = true
-            Log.d(TAG, "Visualizer enabled")
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error setting up visualizer", e)
-        }
-    }
-
-    // При смене трека обновляем визуализатор
-    private fun updateVisualizer() {
-        visualizer?.release()
-        setupVisualizer()
     }
 
     private fun createNotificationChannel() {
@@ -439,42 +329,47 @@ class MusicService : Service() {
         audioManager.abandonAudioFocus(audioFocusChangeListener)
     }
 
-    private fun updateWidget() {
-        val track = currentTrack
-        val title = track?.title ?: "Нет трека"
-        val artist = track?.artist ?: "Неизвестно"
-
-        val intent = Intent("UPDATE_WIDGET").apply {
-            putExtra("title", title)
-            putExtra("artist", artist)
-            putExtra("isPlaying", isPlaying)
-            putExtra("isFavorite", track?.isFavorite ?: false)
-        }
-        sendBroadcast(intent)
+    fun setOnTrackChangeListener(listener: OnTrackChangeListener) {
+        trackChangeListener = listener
     }
 
+    // Изменим setPlaylist
     fun setPlaylist(tracks: List<Track>, startPosition: Int = 0) {
+        // Если сервис уже инициализирован и плейлист не пустой, не сбрасываем
+        if (isServiceInitialized && playlist.isNotEmpty()) {
+            Log.d(TAG, "Service already initialized, keeping current playlist")
+            return
+        }
+
         playlist = tracks
         currentPosition = startPosition.coerceIn(0, tracks.size - 1)
         if (playlist.isNotEmpty()) {
             currentTrack = playlist[currentPosition]
             prepareTrack(currentTrack!!)
+            isServiceInitialized = true
         }
-        Log.d(TAG, "Playlist set with ${tracks.size} tracks")
+        Log.d(TAG, "Playlist set with ${tracks.size} tracks at position $startPosition")
     }
 
-    fun getPlaylist(): List<Track> = playlist
+    // Добавим метод для проверки инициализации
+    fun isInitialized(): Boolean = isServiceInitialized && playlist.isNotEmpty()
 
-    fun playTrackAtPosition(position: Int) {
-        if (position in playlist.indices && position != currentPosition) {
-            currentPosition = position
-            currentTrack = playlist[currentPosition]
-            prepareTrack(currentTrack!!)
-            onPreparedListener = {
-                play()
-            }
-        } else if (position == currentPosition) {
-            play()
+    private fun prepareTrack(track: Track) {
+        try {
+            mediaPlayer?.reset()
+            mediaPlayer?.setDataSource(track.path)
+            mediaPlayer?.prepareAsync()
+            currentTrack = track
+            isPrepared = false
+            isPlaying = false
+            Log.d(TAG, "Подготовка трека: ${track.title}")
+
+            // Уведомляем о смене трека
+            trackChangeListener?.onTrackChanged(track)
+            trackChangeListener?.onPlayStateChanged(false)
+        } catch (e: IOException) {
+            Log.e(TAG, "Ошибка установки источника: ${e.message}")
+            onErrorListener?.invoke("Не удалось загрузить файл: ${track.title}")
         }
     }
 
@@ -484,7 +379,6 @@ class MusicService : Service() {
                 mediaPlayer?.start()
                 isPlaying = true
                 showNotification()
-                updateWidget()
                 Log.d(TAG, "Воспроизведение начато")
                 trackChangeListener?.onPlayStateChanged(true)
             } else if (currentTrack != null) {
@@ -492,21 +386,18 @@ class MusicService : Service() {
                     mediaPlayer?.start()
                     isPlaying = true
                     showNotification()
-                    updateWidget()
                     trackChangeListener?.onPlayStateChanged(true)
                 }
             }
         }
     }
 
-    // В методе pause():
     fun pause() {
         if (isPlaying) {
             mediaPlayer?.pause()
             isPlaying = false
             abandonAudioFocus()
             showNotification()
-            updateWidget()
             Log.d(TAG, "Воспроизведение приостановлено")
             trackChangeListener?.onPlayStateChanged(false)
         }
@@ -531,136 +422,92 @@ class MusicService : Service() {
     fun getDuration(): Int = mediaPlayer?.duration ?: 0
 
     fun playNext() {
-        if (playlist.isEmpty()) {
-            Log.e(TAG, "Playlist is empty")
-            return
-        }
+        if (playlist.isEmpty()) return
 
-        try {
-            Log.d(TAG, "playNext called. Current position: $currentPosition, Shuffle: $shuffleMode, Repeat: $repeatMode")
-
-            when (repeatMode) {
-                RepeatMode.ONE -> {
-                    // Повтор одного трека - просто играем заново текущий
-                    if (currentTrack != null) {
+        when (repeatMode) {
+            RepeatMode.ONE -> {
+                prepareTrack(currentTrack!!)
+                onPreparedListener = { play() }
+            }
+            RepeatMode.ALL -> {
+                if (shuffleMode) {
+                    var newPosition = Random.nextInt(playlist.size)
+                    while (newPosition == currentPosition && playlist.size > 1) {
+                        newPosition = Random.nextInt(playlist.size)
+                    }
+                    currentPosition = newPosition
+                } else {
+                    currentPosition = (currentPosition + 1) % playlist.size
+                }
+                currentTrack = playlist[currentPosition]
+                prepareTrack(currentTrack!!)
+                onPreparedListener = { play() }
+            }
+            RepeatMode.NONE -> {
+                if (shuffleMode) {
+                    if (playlist.size > 1) {
+                        var newPosition = Random.nextInt(playlist.size)
+                        while (newPosition == currentPosition) {
+                            newPosition = Random.nextInt(playlist.size)
+                        }
+                        currentPosition = newPosition
+                        currentTrack = playlist[currentPosition]
                         prepareTrack(currentTrack!!)
                         onPreparedListener = { play() }
                     }
-                }
-                RepeatMode.ALL -> {
-                    if (shuffleMode) {
-                        // Режим перемешивания + повтор всех
-                        val newPosition = generateRandomPosition()
-                        currentPosition = newPosition
-                        Log.d(TAG, "Shuffle mode (repeat all) - new position: $currentPosition")
+                } else {
+                    if (currentPosition < playlist.size - 1) {
+                        currentPosition++
+                        currentTrack = playlist[currentPosition]
+                        prepareTrack(currentTrack!!)
+                        onPreparedListener = { play() }
                     } else {
-                        // Обычный циклический переход
-                        currentPosition = (currentPosition + 1) % playlist.size
-                        Log.d(TAG, "Sequential next (repeat all) to: $currentPosition")
-                    }
-                    currentTrack = playlist[currentPosition]
-                    prepareTrack(currentTrack!!)
-                    onPreparedListener = { play() }
-                }
-                RepeatMode.NONE -> {
-                    if (shuffleMode) {
-                        // Режим перемешивания без повтора
-                        if (playlist.size > 1) {
-                            val newPosition = generateRandomPosition()
-                            currentPosition = newPosition
-                            Log.d(TAG, "Shuffle mode (no repeat) to: $currentPosition")
-                            currentTrack = playlist[currentPosition]
-                            prepareTrack(currentTrack!!)
-                            onPreparedListener = { play() }
-                        }
-                    } else {
-                        // Обычный переход, но без цикла
-                        if (currentPosition < playlist.size - 1) {
-                            currentPosition++
-                            Log.d(TAG, "Sequential next to: $currentPosition")
-                            currentTrack = playlist[currentPosition]
-                            prepareTrack(currentTrack!!)
-                            onPreparedListener = { play() }
-                        } else {
-                            Log.d(TAG, "Last track, stopping")
-                            pause()
-                        }
+                        pause()
                     }
                 }
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in playNext", e)
         }
     }
 
     fun playPrevious() {
-        if (playlist.isEmpty()) {
-            Log.e(TAG, "Playlist is empty")
-            return
-        }
+        if (playlist.isEmpty()) return
 
-        try {
-            Log.d(TAG, "playPrevious called. Current position: $currentPosition, Shuffle: $shuffleMode, Repeat: $repeatMode")
-
-            when (repeatMode) {
-                RepeatMode.ONE -> {
-                    if (currentTrack != null) {
-                        prepareTrack(currentTrack!!)
-                        onPreparedListener = { play() }
-                    }
-                }
-                else -> {
-                    if (shuffleMode) {
-                        // В режиме перемешивания предыдущий трек - тоже случайный
-                        val newPosition = generateRandomPosition()
-                        currentPosition = newPosition
-                        Log.d(TAG, "Shuffle mode previous to: $currentPosition")
-                    } else {
-                        // Обычный переход назад
-                        currentPosition = if (currentPosition > 0) {
-                            currentPosition - 1
-                        } else {
-                            playlist.size - 1
-                        }
-                        Log.d(TAG, "Sequential previous to: $currentPosition")
-                    }
-                    currentTrack = playlist[currentPosition]
-                    prepareTrack(currentTrack!!)
-                    onPreparedListener = { play() }
-                }
+        when (repeatMode) {
+            RepeatMode.ONE -> {
+                prepareTrack(currentTrack!!)
+                onPreparedListener = { play() }
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in playPrevious", e)
+            else -> {
+                if (shuffleMode) {
+                    var newPosition = Random.nextInt(playlist.size)
+                    while (newPosition == currentPosition && playlist.size > 1) {
+                        newPosition = Random.nextInt(playlist.size)
+                    }
+                    currentPosition = newPosition
+                } else {
+                    currentPosition = if (currentPosition > 0) {
+                        currentPosition - 1
+                    } else {
+                        playlist.size - 1
+                    }
+                }
+                currentTrack = playlist[currentPosition]
+                prepareTrack(currentTrack!!)
+                onPreparedListener = { play() }
+            }
         }
     }
-
-    // Вспомогательный метод для генерации случайной позиции
-    private fun generateRandomPosition(): Int {
-        if (playlist.size <= 1) return 0
-
-        var newPosition = currentPosition
-        while (newPosition == currentPosition) {
-            newPosition = (0 until playlist.size).random()
-        }
-        return newPosition
-    }
-
-
 
     fun getCurrentTrack(): Track? = currentTrack
 
     fun setRepeatMode(mode: RepeatMode) {
         repeatMode = mode
-        Log.d(TAG, "Repeat mode set to: $mode")
+        Log.d(TAG, "Repeat mode: $mode")
     }
 
     fun setShuffleMode(enabled: Boolean) {
         shuffleMode = enabled
-        Log.d(TAG, "Shuffle mode set to: $enabled")
-    }
-
-    fun setOnTrackChangeListener(listener: OnTrackChangeListener) {
-        trackChangeListener = listener
+        Log.d(TAG, "Shuffle mode: $enabled")
     }
 
     fun setOnPreparedListener(listener: () -> Unit) {
@@ -683,24 +530,46 @@ class MusicService : Service() {
         Log.d(TAG, "MusicService получена команда: ${intent?.action}")
 
         when (intent?.action) {
-            "PLAY_PAUSE" -> {
-                if (isPlaying) pause() else play()
-            }
-            "NEXT" -> {
-                playNext()
-            }
-            "PREV" -> {
-                playPrevious()
-            }
-            "PAUSE" -> {
-                pause()
-            }
-            "STOP" -> {
-                stop()
+            "PLAY_PAUSE" -> if (isPlaying) pause() else play()
+            "NEXT" -> playNext()
+            "PREV" -> playPrevious()
+            "PAUSE" -> pause()
+            "STOP" -> stop()
+            else -> {
+                // При обычном запуске без команды ничего не делаем
+                Log.d(TAG, "Service started without command")
             }
         }
 
         return START_STICKY
+    }
+
+    // Добавьте в начало класса MusicService
+    private var savedTrackId: Long = -1
+    private var savedPosition: Int = 0
+
+    // Метод для сохранения текущего трека
+    fun saveCurrentTrack() {
+        savedTrackId = currentTrack?.id ?: -1
+        savedPosition = currentPosition
+        Log.d(TAG, "Saved track: $savedTrackId at position $savedPosition")
+    }
+
+    // Метод для получения сохраненного трека
+    fun getSavedTrackId(): Long = savedTrackId
+    fun getSavedPosition(): Int = savedPosition
+
+    // Метод для восстановления трека
+    fun restoreTrackIfNeeded(tracks: List<Track>) {
+        if (savedTrackId != -1L && playlist.isEmpty()) {
+            val index = tracks.indexOfFirst { it.id == savedTrackId }
+            if (index != -1) {
+                setPlaylist(tracks, index)
+                Log.d(TAG, "Restored track at position $index")
+            } else {
+                setPlaylist(tracks, 0)
+            }
+        }
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
@@ -719,59 +588,5 @@ class MusicService : Service() {
         unregisterReceiver(noisyReceiver)
         abandonAudioFocus()
         Log.d(TAG, "MusicService уничтожен")
-    }
-
-    // Добавьте этот метод в MusicService
-    fun startVisualizerDebug() {
-        try {
-            val sessionId = mediaPlayer?.audioSessionId ?: run {
-                Log.e(TAG, "No audio session ID available")
-                return
-            }
-            Log.d(TAG, "Starting visualizer debug for session: $sessionId")
-
-            val visualizer = Visualizer(sessionId)
-            visualizer.captureSize = Visualizer.getCaptureSizeRange()[1]
-
-            visualizer.setDataCaptureListener(
-                object : Visualizer.OnDataCaptureListener {
-                    override fun onWaveFormDataCapture(
-                        visualizer: Visualizer?,
-                        waveform: ByteArray?,
-                        samplingRate: Int
-                    ) {
-                        if (waveform != null) {
-                            Log.d(TAG, "Waveform data received, size: ${waveform.size}")
-                            // Проверяем, есть ли ненулевые данные
-                            var hasData = false
-                            for (i in 0 until minOf(10, waveform.size)) {
-                                if (abs(waveform[i].toInt()) > 10) {
-                                    hasData = true
-                                    break
-                                }
-                            }
-                            Log.d(TAG, "Has audio data: $hasData")
-
-                            visualizerListener?.onWaveformData(waveform)
-                        }
-                    }
-
-                    override fun onFftDataCapture(
-                        visualizer: Visualizer?,
-                        fft: ByteArray?,
-                        samplingRate: Int
-                    ) {}
-                },
-                Visualizer.getMaxCaptureRate() / 2,
-                true,
-                false
-            )
-
-            visualizer.enabled = true
-            Log.d(TAG, "Visualizer enabled: ${visualizer.enabled}")
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in visualizer debug", e)
-        }
     }
 }
